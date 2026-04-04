@@ -54,16 +54,16 @@ impl Coord {
     fn in_palace(self, color: Color) -> bool {
         let x_ok = self.x >= 3 && self.x <= 5;
         let y_ok = match color {
-            Color::Red => self.y <= 2,
-            Color::Black => self.y >= 7,
+            Color::Black=> self.y <= 2,
+            Color::Red => self.y >= 7,
         };
         x_ok && y_ok
     }
 
     fn crosses_river(self, color: Color) -> bool {
         match color {
-            Color::Red => self.y >= 5,
-            Color::Black => self.y <= 4,
+            Color::Black => self.y >= 5,
+            Color::Red => self.y <= 4,
         }
     }
 }
@@ -149,6 +149,8 @@ impl Board {
         Board { cells }
     }
 
+
+
     fn get(&self, coord: Coord) -> Option<Piece> {
         self.cells[coord.y as usize][coord.x as usize]
     }
@@ -173,7 +175,7 @@ impl Board {
         let mut red_king = None;
         let mut black_king = None;
 
-        for y in 0..10 {
+        'outer: for y in 0..10 {
             for x in 0..9 {
                 if let Some(p) = self.cells[y][x] {
                     if p.piece_type == PieceType::King {
@@ -182,6 +184,9 @@ impl Board {
                             Color::Black => black_king = Some(Coord::new(x as u8, y as u8)),
                         }
                     }
+                }
+                if red_king.is_some() && black_king.is_some() {
+                    break 'outer;
                 }
             }
         }
@@ -202,6 +207,37 @@ impl Board {
         }
 
         true
+    }
+    fn get_winner(&self) -> Option<Color> {
+        let mut red_king = None;
+        let mut black_king = None;
+
+        'outer: for y in 0..10 {
+            for x in 0..9 {
+                if let Some(p) = self.cells[y][x] {
+                    if p.piece_type == PieceType::King {
+                        match p.color {
+                            Color::Red => red_king = Some(Coord::new(x as u8, y as u8)),
+                            Color::Black => black_king = Some(Coord::new(x as u8, y as u8)),
+                        }
+                    }
+                }
+                if red_king.is_some() && black_king.is_some() {
+                    break 'outer;
+                }
+            }
+        }
+
+        if red_king.is_some() && black_king.is_some() {None}else{red_king.map(|i| self.get(i).unwrap().color).or_else(|| Some(self.get(black_king.unwrap()).unwrap().color))}
+    }
+    fn flip_vertically(&mut self) {
+        for x in 0..9 {
+            for y in 0..5 {
+                let tmp = self.cells[y][x];
+                self.cells[y][x] = self.cells[9 - y][x];
+                self.cells[9 - y][x] = tmp;
+            }
+        }
     }
 }
 
@@ -684,7 +720,7 @@ mod search {
             }
 
             if eval > alpha {
-                alpha = eval;
+                alpha=eval;
             }
 
             if alpha >= beta {
@@ -698,22 +734,48 @@ mod search {
     pub fn find_best_move(board: &mut Board, depth: u8, side: Color) -> Option<Action> {
         let mut best_action = Some(Action::new(Coord::new(0, 0), Coord::new(0, 0), None));
         let _ = alpha_beta(board, depth, depth, -100000, 100000, side, &mut best_action);
+        if let Some(action) = best_action {
+            if action.src==action.tar {
+                best_action = None;
+            }
+        }
         best_action
     }
 }
 
 pub const MAX_DEPTH: u8 = 6;
+macro_rules! print_board {
+    ($board:ident,$order:ident) => {
+        match $order {
+            1 => println!("{}", $board),
+            2 => {
+                $board.flip_vertically();
+                println!("{}", $board);
+                $board.flip_vertically();
+            }
+            _ => unreachable!(),
+        }
+    }
+}
 macro_rules! next_move {
-    ($board:ident) => {
+    ($board:ident,$order:ident) => {
         // AI走 (红方)
         println!("AI思考中...");
         if let Some(action) = search::find_best_move(&mut $board, MAX_DEPTH, Color::Red) {
             println!(
                 "AI走: ({}, {}) -> ({}, {})",
-                action.src.x, action.src.y, action.tar.x, action.tar.y
+                action.src.x, match $order {
+                1 => action.src.y,
+                2 => 9 - action.src.y,
+                _ => unreachable!(),
+            }, action.tar.x, match $order {
+                1 => action.tar.y,
+                2 => 9 - action.tar.y,
+                _ => unreachable!(),
+            }
             );
             $board.make_move(action);
-            println!("{}", $board);
+            print_board!($board,$order);
         } else {
             println!("AI无子可走，你赢了！");
             break;
@@ -732,8 +794,6 @@ fn main() {
 
     let mut board = Board::new();
     println!("中国象棋引擎");
-    println!("{}", board);
-
     let stdin = io::stdin();
     let mut input = String::new();
 
@@ -743,12 +803,13 @@ fn main() {
     if !(1..=2).contains(&order) {
         panic!("Invalid order number");
     }
+    print_board!(board,order);
     let mut ai_move = true;
 
     loop {
         if order == 1 {
             if ai_move {
-                next_move!(board);
+                next_move!(board,order);
             }
         }
 
@@ -771,7 +832,11 @@ fn main() {
             }
         };
         let y1 = match parts[1].parse::<u8>() {
-            Ok(v) => v,
+            Ok(v) => match order {
+                1 => v,
+                2 => 9 - v,
+                _ => unreachable!(),
+            },
             Err(_) => {
                 println!("无效坐标");
                 reinput!(ai_move);
@@ -785,7 +850,11 @@ fn main() {
             }
         };
         let y2 = match parts[3].parse::<u8>() {
-            Ok(v) => v,
+            Ok(v) => match order {
+                1 => v,
+                2 => 9 - v,
+                _ => unreachable!(),
+            },
             Err(_) => {
                 println!("无效坐标");
                 reinput!(ai_move);
@@ -826,12 +895,46 @@ fn main() {
             reinput!(ai_move);
         }
 
-        println!("{}", board);
+        print_board!(board,order);
         ai_move = true;
 
         if order == 2 {
             if ai_move {
-                next_move!(board);
+                next_move!(board,order);
+            }
+        }
+
+        match board.get_winner() {
+            Some(c) => {
+                match c {
+                    Color::Black => {
+                        println!("你赢了!");
+                        break;
+                    },
+                    Color::Red => {
+                        println!("你输了!");
+                        break;
+                    }
+                }
+            },
+            None => {
+                macro_rules! make_filter {
+                    () => {
+                        |i|{board.make_move(*i);let res=!board.is_face_to_face();board.undo_move(*i);res}
+                    };
+                }
+                let r = movegen::generate_all_moves(&board, Color::Red).into_iter().filter(make_filter!()).collect::<Vec<_>>();
+                let b = movegen::generate_all_moves(&board, Color::Black).into_iter().filter(make_filter!()).collect::<Vec<_>>();
+                if r.is_empty() && b.is_empty() {
+                    println!("平局");
+                    break;
+                } else if r.is_empty() {
+                    println!("你赢了!");
+                    break;
+                } else if b.is_empty() {
+                    println!("你输了!");
+                    break;
+                }
             }
         }
     }
