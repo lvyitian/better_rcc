@@ -615,7 +615,7 @@ pub struct Board {
 }
 
 impl Board {
-    pub fn new(rule_set: RuleSet) -> Self {
+    pub fn new(rule_set: RuleSet, order: u8) -> Self {
         let mut cells = [[None; 9]; 10];
         let back_row = [
             PieceType::Chariot,
@@ -669,7 +669,7 @@ impl Board {
         Board {
             cells,
             zobrist_key,
-            current_side: Color::Red,
+            current_side: match order { 1 => Color::Red, 2 => Color::Black, _=>unreachable!() },
             rule_set,
             move_history: Vec::with_capacity(200),
             repetition_history,
@@ -2021,7 +2021,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("已选择：{}", if order == 1 { "AI先手" } else { "玩家先手" });
 
-    let mut board = Board::new(rule_set);
+    let mut board = Board::new(rule_set, order);
     println!("\n=== 游戏开始 ===");
     print_board(&board, order);
 
