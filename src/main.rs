@@ -3,18 +3,25 @@ use std::io;
 use std::io::Write;
 use std::sync::OnceLock;
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 
 pub const BOARD_WIDTH: i8 = 9;
 pub const BOARD_HEIGHT: i8 = 10;
-pub const MAX_DEPTH: u8 = 8;          // 改回 8 层深度
+pub const MAX_DEPTH: u8 = 14;
 pub const QS_MAX_DEPTH: u8 = 8;
 pub const MAX_CHECK_EXTENSION: u8 = 2;
-pub const TT_SIZE: usize = 1 << 24;
+pub const MAX_TOTAL_EXTENSION: u8 = 3;
+pub const TT_SIZE: usize = 1 << 25;
 pub const ENDGAME_THRESHOLD: i32 = 2000;
 pub const MIDGAME_THRESHOLD: i32 = 4000;
 pub const REPETITION_VIOLATION_COUNT: u8 = 3;
-pub const SEARCH_TIMEOUT_MS: u64 = 15000; // 改为 15 秒超时
+pub const SEARCH_TIMEOUT_MS: u64 = 15000;
+pub const TIME_BUFFER_MS: u64 = 1000;
+pub const NULL_MOVE_REDUCTION: u8 = 2;
+pub const LMR_MIN_MOVES: usize = 4;
+pub const SEARCH_THREADS: usize = 4;
+pub const FUTILITY_MARGIN: i32 = 200;
+pub const SEE_MARGIN: i32 = -50;
+pub const ASPIRATION_WINDOW: i32 = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleSet {
@@ -465,29 +472,34 @@ pub mod movegen {
         moves
     }
 
+    #[inline(always)]
+    fn is_legal_move(board: &mut Board, action: Action, side: Color) -> (bool, bool) {
+        let src = action.src;
+        let tar = action.tar;
+        let piece = board.get(src).unwrap();
+        let captured = action.captured;
+
+        board.cells[tar.y as usize][tar.x as usize] = Some(piece);
+        board.cells[src.y as usize][src.x as usize] = None;
+
+        let is_self_checked = board.is_check(side);
+        let legal = !is_self_checked;
+        let gives_check = legal && board.is_check(side.opponent());
+
+        board.cells[src.y as usize][src.x as usize] = Some(piece);
+        board.cells[tar.y as usize][tar.x as usize] = captured;
+
+        (legal, gives_check)
+    }
+
     pub fn generate_legal_moves(board: &mut Board, color: Color) -> Vec<Action> {
         let mut legal_moves = Vec::with_capacity(40);
         let pseudo_moves = generate_pseudo_moves(board, color);
 
         for mut action in pseudo_moves {
-            let src = action.src;
-            let tar = action.tar;
-            let piece = board.get(src).unwrap();
-            let captured = action.captured;
-
-            board.cells[tar.y as usize][tar.x as usize] = Some(piece);
-            board.cells[src.y as usize][src.x as usize] = None;
-
-            let is_self_checked = board.is_check(color);
-            let legal = !is_self_checked;
-
-            action.is_check = board.is_check(color.opponent());
-            action.is_capture_threat = board.is_capture_threat_internal(color);
-
-            board.cells[src.y as usize][src.x as usize] = Some(piece);
-            board.cells[tar.y as usize][tar.x as usize] = captured;
-
+            let (legal, gives_check) = is_legal_move(board, action, color);
             if legal {
+                action.is_check = gives_check;
                 legal_moves.push(action);
             }
         }
@@ -500,26 +512,95 @@ pub mod movegen {
         moves.retain(|a| a.captured.is_some());
 
         let mut legal_captures = Vec::new();
-        for action in moves {
-            let src = action.src;
-            let tar = action.tar;
-            let piece = board.get(src).unwrap();
-            let captured = action.captured;
-
-            board.cells[tar.y as usize][tar.x as usize] = Some(piece);
-            board.cells[src.y as usize][src.x as usize] = None;
-
-            let legal = !board.is_check(color);
-
-            board.cells[src.y as usize][src.x as usize] = Some(piece);
-            board.cells[tar.y as usize][tar.x as usize] = captured;
-
+        for mut action in moves {
+            let (legal, gives_check) = is_legal_move(board, action, color);
             if legal {
+                action.is_check = gives_check;
                 legal_captures.push(action);
             }
         }
 
         legal_captures
+    }
+
+    const SEE_VALUE: [i32; 7] = [10000, 110, 110, 70, 320, 320, 600];
+
+    pub fn see(board: &Board, src: Coord, tar: Coord) -> i32 {
+        let mut swap_list = [0; 32];
+        let mut swap_idx = 0;
+        let mut side = board.get(src).unwrap().color;
+        let current_attacker = src;
+        let captured_value = SEE_VALUE[board.get(tar).map_or(0, |p| p.piece_type as usize)];
+
+        swap_list[swap_idx] = captured_value;
+        swap_idx += 1;
+
+        let mut board_copy = board.clone();
+        let moving_piece = board_copy.get(current_attacker).unwrap();
+        board_copy.set_internal(tar, Some(moving_piece));
+        board_copy.set_internal(current_attacker, None);
+        side = side.opponent();
+
+        loop {
+            let (attacker, attacker_value) = find_least_valuable_attacker(&board_copy, tar, side);
+            if attacker.is_none() {
+                break;
+            }
+
+            swap_list[swap_idx] = -swap_list[swap_idx - 1] + attacker_value;
+            swap_idx += 1;
+
+            let attacker_piece = board_copy.get(attacker.unwrap()).unwrap();
+            board_copy.set_internal(tar, Some(attacker_piece));
+            board_copy.set_internal(attacker.unwrap(), None);
+            side = side.opponent();
+
+            if attacker_piece.piece_type == PieceType::King {
+                break;
+            }
+        }
+
+        let mut score = 0;
+        for i in (0..swap_idx).rev() {
+            score = (-score).max(swap_list[i]);
+        }
+
+        score
+    }
+
+    fn find_least_valuable_attacker(board: &Board, tar: Coord, side: Color) -> (Option<Coord>, i32) {
+        let mut min_value = i32::MAX;
+        let mut min_attacker = None;
+
+        for y in 0..BOARD_HEIGHT {
+            for x in 0..BOARD_WIDTH {
+                let pos = Coord::new(x, y);
+                if let Some(piece) = board.get(pos) {
+                    if piece.color != side {
+                        continue;
+                    }
+                    let can_attack = match piece.piece_type {
+                        PieceType::Pawn => generate_pawn_moves(board, pos, side).contains(&tar),
+                        PieceType::Horse => generate_horse_moves(board, pos, side).contains(&tar),
+                        PieceType::Chariot => generate_chariot_moves(board, pos, side).contains(&tar),
+                        PieceType::Cannon => generate_cannon_moves(board, pos, side).contains(&tar),
+                        PieceType::Elephant => generate_elephant_moves(board, pos, side).contains(&tar),
+                        PieceType::Advisor => generate_advisor_moves(board, pos, side).contains(&tar),
+                        PieceType::King => generate_king_moves(board, pos, side).contains(&tar),
+                    };
+
+                    if can_attack {
+                        let value = SEE_VALUE[piece.piece_type as usize];
+                        if value < min_value {
+                            min_value = value;
+                            min_attacker = Some(pos);
+                        }
+                    }
+                }
+            }
+        }
+
+        (min_attacker, min_value)
     }
 }
 
@@ -1038,7 +1119,79 @@ pub mod eval {
         val * color.sign()
     }
 
+    fn king_safety(board: &Board, color: Color) -> i32 {
+        let (rk, bk) = board.find_kings();
+        let king_pos = match color {
+            Color::Red => match rk {
+                Some(pos) => pos,
+                None => return 0, // 修复：如果找不到将/帅，直接返回
+            },
+            Color::Black => match bk {
+                Some(pos) => pos,
+                None => return 0, // 修复：如果找不到将/帅，直接返回
+            },
+        };
+        let opponent = color.opponent();
+        let mut safety: i32 = 0;
+
+        let palace_deltas = [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)];
+        for (dx, dy) in palace_deltas {
+            let pos = Coord::new(king_pos.x + dx, king_pos.y + dy);
+            if pos.is_valid() && pos.in_palace(color) {
+                if let Some(p) = board.get(pos) {
+                    if p.color == color {
+                        safety += 15;
+                    }
+                }
+            }
+        }
+
+        for y in 0..10 {
+            for x in 0..9 {
+                let pos = Coord::new(x as i8, y as i8);
+                if let Some(p) = board.get(pos) {
+                    if p.color == opponent {
+                        let dist = (pos.x - king_pos.x).abs() + (pos.y - king_pos.y).abs();
+                        match p.piece_type {
+                            PieceType::Chariot => safety -= (12 - dist).max(0) as i32 * 8,
+                            PieceType::Cannon => safety -= (10 - dist).max(0) as i32 * 5,
+                            PieceType::Horse => safety -= (8 - dist).max(0) as i32 * 6,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        safety * color.sign()
+    }
+
+    fn center_control(board: &Board) -> i32 {
+        let mut control = 0;
+        let center_squares = [
+            Coord::new(3,4), Coord::new(4,4), Coord::new(5,4),
+            Coord::new(3,5), Coord::new(4,5), Coord::new(5,5),
+            Coord::new(4,3), Coord::new(4,6),
+        ];
+
+        for &pos in &center_squares {
+            if let Some(p) = board.get(pos) {
+                control += if p.color == Color::Red { 25 } else { -25 };
+            }
+        }
+        control
+    }
+
     pub fn evaluate(board: &Board, side: Color) -> i32 {
+        // 如果一方已经没有将/帅了，直接返回胜负值
+        let (rk, bk) = board.find_kings();
+        if rk.is_none() {
+            return if side == Color::Red { -100000 } else { 100000 };
+        }
+        if bk.is_none() {
+            return if side == Color::Red { 100000 } else { -100000 };
+        }
+
         let phase = game_phase(board).clamp(0.0, 1.0);
         let mut score = 0;
 
@@ -1059,11 +1212,15 @@ pub mod eval {
             }
         }
 
+        score += king_safety(board, Color::Red);
+        score -= king_safety(board, Color::Black);
+        score += center_control(board);
+
         if board.is_check(Color::Black) {
-            score += 50;
+            score += 150;
         }
         if board.is_check(Color::Red) {
-            score -= 50;
+            score -= 150;
         }
 
         if side == Color::Red { score } else { -score }
@@ -1074,23 +1231,79 @@ pub mod search {
     use super::*;
     use eval::evaluate;
     use movegen::*;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, RwLock};
+    use std::time::{Duration, Instant};
+    use std::thread;
 
-    pub struct SearchContext {
-        pub tt: TranspositionTable,
-        pub history_table: [[i32; 90]; 90],
-        pub killer_moves: [[Option<Action>; 2]; (MAX_DEPTH + 2) as usize],
-        pub nodes_searched: u64,
+    #[derive(Clone)]
+    pub struct SharedTT {
+        pub tt: Arc<RwLock<TranspositionTable>>,
     }
 
-    impl SearchContext {
+    impl SharedTT {
         pub fn new() -> Self {
-            SearchContext {
-                tt: TranspositionTable::new(),
+            SharedTT {
+                tt: Arc::new(RwLock::new(TranspositionTable::new())),
+            }
+        }
+
+        #[inline(always)]
+        pub fn store(&self, key: u64, depth: u8, value: i32, entry_type: TTEntryType, best_move: Option<Action>) {
+            if let Ok(mut tt) = self.tt.write() {
+                tt.store(key, depth, value, entry_type, best_move);
+            }
+        }
+
+        #[inline(always)]
+        pub fn probe(&self, key: u64) -> Option<TTEntry> {
+            if let Ok(tt) = self.tt.read() {
+                tt.probe(key).copied()
+            } else {
+                None
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct TimeContext {
+        pub start_time: Instant,
+        pub time_limit: Duration,
+        pub stop_flag: Arc<AtomicBool>,
+        pub nodes_searched: Arc<AtomicU64>,
+    }
+
+    impl TimeContext {
+        #[inline(always)]
+        pub fn is_time_up(&self) -> bool {
+            if self.stop_flag.load(Ordering::Relaxed) {
+                return true;
+            }
+            if self.start_time.elapsed() >= self.time_limit - Duration::from_millis(TIME_BUFFER_MS) {
+                self.stop_flag.store(true, Ordering::Relaxed);
+                return true;
+            }
+            false
+        }
+
+        #[inline(always)]
+        pub fn add_node(&self) {
+            self.nodes_searched.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub struct ThreadContext {
+        pub history_table: [[i32; 90]; 90],
+        pub killer_moves: [[Option<Action>; 2]; (MAX_DEPTH + 4) as usize],
+        pub counter_moves: [[Option<Action>; 90]; 90],
+    }
+
+    impl ThreadContext {
+        pub fn new() -> Self {
+            ThreadContext {
                 history_table: [[0; 90]; 90],
-                killer_moves: [[None; 2]; (MAX_DEPTH + 2) as usize],
-                nodes_searched: 0,
+                killer_moves: [[None; 2]; (MAX_DEPTH + 4) as usize],
+                counter_moves: [[None; 90]; 90],
             }
         }
 
@@ -1100,7 +1313,7 @@ pub mod search {
             let from_idx = zobrist.pos_idx(action.src);
             let to_idx = zobrist.pos_idx(action.tar);
             self.history_table[from_idx][to_idx] += (depth * depth) as i32;
-            if self.history_table[from_idx][to_idx] > 1_000_000 {
+            if self.history_table[from_idx][to_idx] > 2_000_000 {
                 for row in &mut self.history_table {
                     for val in row {
                         *val /= 2;
@@ -1112,7 +1325,7 @@ pub mod search {
         #[inline(always)]
         pub fn update_killer(&mut self, action: Action, depth: u8) {
             let depth_idx = depth as usize;
-            if depth_idx >= (MAX_DEPTH + 2) as usize {
+            if depth_idx >= self.killer_moves.len() {
                 return;
             }
             if self.killer_moves[depth_idx][0] != Some(action) {
@@ -1121,7 +1334,32 @@ pub mod search {
             }
         }
 
-        pub fn sort_moves(&self, moves: &mut Vec<Action>, tt_move: Option<Action>, depth: u8) {
+        #[inline(always)]
+        pub fn update_counter(&mut self, prev_action: Action, current_action: Action) {
+            let zobrist = get_zobrist();
+            let prev_from = zobrist.pos_idx(prev_action.src);
+            let prev_to = zobrist.pos_idx(prev_action.tar);
+            self.counter_moves[prev_from][prev_to] = Some(current_action);
+        }
+
+        #[inline(always)]
+        pub fn age_tables(&mut self) {
+            for row in &mut self.history_table {
+                for val in row {
+                    *val = *val * 3 / 4;
+                }
+            }
+        }
+
+        pub fn sort_moves(
+            &self,
+            moves: &mut Vec<Action>,
+            tt_move: Option<Action>,
+            prev_action: Option<Action>,
+            depth: u8,
+            is_in_check: bool,
+            board: &Board,
+        ) {
             let depth_idx = depth as usize;
             let zobrist = get_zobrist();
 
@@ -1132,14 +1370,42 @@ pub mod search {
                     return b_is_tt.cmp(&a_is_tt);
                 }
 
+                if is_in_check {
+                    let a_see = see(board, a.src, a.tar);
+                    let b_see = see(board, b.src, b.tar);
+                    if a_see != b_see {
+                        return b_see.cmp(&a_see);
+                    }
+                }
+
                 if a.is_check != b.is_check {
                     return b.is_check.cmp(&a.is_check);
+                }
+
+                let a_see = see(board, a.src, a.tar);
+                let b_see = see(board, b.src, b.tar);
+                if a_see != b_see {
+                    return b_see.cmp(&a_see);
                 }
 
                 let a_mvv = a.mvv_lva_score();
                 let b_mvv = b.mvv_lva_score();
                 if a_mvv != b_mvv {
                     return b_mvv.cmp(&a_mvv);
+                }
+
+                let a_is_counter = prev_action.map_or(false, |pa| {
+                    let prev_from = zobrist.pos_idx(pa.src);
+                    let prev_to = zobrist.pos_idx(pa.tar);
+                    self.counter_moves[prev_from][prev_to] == Some(*a)
+                });
+                let b_is_counter = prev_action.map_or(false, |pa| {
+                    let prev_from = zobrist.pos_idx(pa.src);
+                    let prev_to = zobrist.pos_idx(pa.tar);
+                    self.counter_moves[prev_from][prev_to] == Some(*b)
+                });
+                if a_is_counter != b_is_counter {
+                    return b_is_counter.cmp(&a_is_counter);
                 }
 
                 let a_is_killer = self.killer_moves[depth_idx].contains(&Some(*a));
@@ -1159,21 +1425,40 @@ pub mod search {
 
     pub fn quiescence(
         board: &mut Board,
-        ctx: &mut SearchContext,
+        thread_ctx: &mut ThreadContext,
+        shared_tt: &SharedTT,
         mut alpha: i32,
-        beta: i32,
+        mut beta: i32,
         side: Color,
         depth: u8,
-        stop_flag: &AtomicBool,
+        time_ctx: &TimeContext,
     ) -> i32 {
-        ctx.nodes_searched += 1;
+        time_ctx.add_node();
 
-        if stop_flag.load(Ordering::Relaxed) || depth >= QS_MAX_DEPTH {
+        if time_ctx.is_time_up() {
+            return alpha;
+        }
+
+        if depth >= QS_MAX_DEPTH {
             return evaluate(board, side);
         }
 
         if let Some(winner) = board.is_repetition_violation() {
             return if winner == side { 100000 } else { -100000 };
+        }
+
+        let key = board.zobrist_key;
+        if let Some(entry) = shared_tt.probe(key) {
+            if entry.depth >= depth {
+                match entry.entry_type {
+                    TTEntryType::Exact => return entry.value,
+                    TTEntryType::Lower => alpha = alpha.max(entry.value),
+                    TTEntryType::Upper => beta = beta.min(entry.value),
+                }
+                if alpha >= beta {
+                    return entry.value;
+                }
+            }
         }
 
         let stand_pat = evaluate(board, side);
@@ -1184,124 +1469,46 @@ pub mod search {
             alpha = stand_pat;
         }
 
-        let mut moves = generate_capture_moves(board, side);
-        moves.sort_by(|a, b| b.mvv_lva_score().cmp(&a.mvv_lva_score()));
+        let is_in_check = board.is_check(side);
+        let mut moves = if is_in_check {
+            generate_legal_moves(board, side)
+        } else {
+            let mut captures = generate_capture_moves(board, side);
+            captures.retain(|a| see(board, a.src, a.tar) >= SEE_MARGIN);
+            captures
+        };
+
+        moves.sort_by(|a, b| see(board, b.src, b.tar).cmp(&see(board, a.src, a.tar)));
+
+        let original_alpha = alpha;
+        let mut best_eval = stand_pat;
 
         for action in moves {
+            if !is_in_check && action.captured.is_some() {
+                let capture_value = see(board, action.src, action.tar);
+                if stand_pat + capture_value + 200 < alpha {
+                    continue;
+                }
+            }
+
             board.make_move(action);
-            let eval = -quiescence(board, ctx, -beta, -alpha, side.opponent(), depth + 1, stop_flag);
+            let eval = -quiescence(
+                board, thread_ctx, shared_tt, -beta, -alpha,
+                side.opponent(), depth + 1, time_ctx
+            );
             board.undo_move(action);
 
-            if stop_flag.load(Ordering::Relaxed) {
+            if time_ctx.is_time_up() {
                 return alpha;
-            }
-
-            if eval >= beta {
-                return beta;
-            }
-            if eval > alpha {
-                alpha = eval;
-            }
-        }
-
-        alpha
-    }
-
-    pub fn pvs(
-        board: &mut Board,
-        ctx: &mut SearchContext,
-        depth: u8,
-        mut alpha: i32,
-        mut beta: i32,
-        side: Color,
-        pv_node: bool,
-        best_action: &mut Option<Action>,
-        stop_flag: &AtomicBool,
-        extension_count: u8,
-    ) -> i32 {
-        ctx.nodes_searched += 1;
-        let original_alpha = alpha;
-        let key = board.zobrist_key;
-
-        if stop_flag.load(Ordering::Relaxed) {
-            return 0;
-        }
-
-        if let Some(winner) = board.is_repetition_violation() {
-            return if winner == side { 100000 } else { -100000 };
-        }
-
-        if let Some(entry) = ctx.tt.probe(key) {
-            if entry.depth >= depth {
-                match entry.entry_type {
-                    TTEntryType::Exact => {
-                        *best_action = entry.best_move;
-                        return entry.value;
-                    }
-                    TTEntryType::Lower => alpha = alpha.max(entry.value),
-                    TTEntryType::Upper => beta = beta.min(entry.value),
-                }
-                if alpha >= beta {
-                    return entry.value;
-                }
-            }
-        }
-
-        if depth == 0 {
-            return quiescence(board, ctx, alpha, beta, side, 0, stop_flag);
-        }
-
-        let mut moves = generate_legal_moves(board, side);
-        if moves.is_empty() {
-            return if board.is_check(side) { -100000 + (MAX_DEPTH - depth) as i32 } else { 0 };
-        }
-
-        let tt_move = ctx.tt.probe(key).and_then(|e| e.best_move);
-        ctx.sort_moves(&mut moves, tt_move, depth);
-
-        let mut best_eval = -i32::MAX;
-        let mut current_best_move = None;
-        let mut has_pv = false;
-
-        for (_i, action) in moves.iter().enumerate() {
-            let extension = if action.is_check && extension_count < MAX_CHECK_EXTENSION { 1 } else { 0 };
-            let new_extension_count = if action.is_check { extension_count + 1 } else { extension_count };
-
-            board.make_move(*action);
-
-            let mut eval;
-
-            if has_pv {
-                eval = -pvs(board, ctx, depth - 1 + extension, -alpha - 1, -alpha, side.opponent(), false, &mut None, stop_flag, new_extension_count);
-                if eval > alpha && eval < beta && !stop_flag.load(Ordering::Relaxed) {
-                    eval = -pvs(board, ctx, depth - 1 + extension, -beta, -alpha, side.opponent(), true, &mut None, stop_flag, new_extension_count);
-                }
-            } else {
-                eval = -pvs(board, ctx, depth - 1 + extension, -beta, -alpha, side.opponent(), pv_node, &mut None, stop_flag, new_extension_count);
-            }
-
-            board.undo_move(*action);
-
-            if stop_flag.load(Ordering::Relaxed) {
-                return best_eval.max(alpha);
             }
 
             if eval > best_eval {
                 best_eval = eval;
-                current_best_move = Some(*action);
-                *best_action = Some(*action);
             }
-
             if eval > alpha {
                 alpha = eval;
-                has_pv = true;
             }
-
             if alpha >= beta {
-                if action.captured.is_none() {
-                    ctx.update_killer(*action, depth);
-                    ctx.update_history(*action, depth);
-                }
                 break;
             }
         }
@@ -1313,45 +1520,391 @@ pub mod search {
         } else {
             TTEntryType::Exact
         };
-        ctx.tt.store(key, depth, best_eval, entry_type, current_best_move);
+        shared_tt.store(key, depth, best_eval, entry_type, None);
 
         best_eval
     }
 
-    pub fn find_best_move(board: &mut Board, max_depth: u8, side: Color) -> Option<Action> {
+    pub fn zw_search(
+        board: &mut Board,
+        thread_ctx: &mut ThreadContext,
+        shared_tt: &SharedTT,
+        depth: u8,
+        beta: i32,
+        side: Color,
+        pv_node: bool,
+        best_action: &mut Option<Action>,
+        time_ctx: &TimeContext,
+        extension_count: u8,
+        prev_action: Option<Action>,
+    ) -> i32 {
+        time_ctx.add_node();
+        let mut alpha = beta - 1;
+        let original_alpha = alpha;
+        let key = board.zobrist_key;
+        let is_in_check = board.is_check(side);
+
+        if time_ctx.is_time_up() {
+            return alpha;
+        }
+
+        if let Some(winner) = board.is_repetition_violation() {
+            return if winner == side { 100000 } else { -100000 };
+        }
+
+        if let Some(entry) = shared_tt.probe(key) {
+            if entry.depth >= depth {
+                match entry.entry_type {
+                    TTEntryType::Exact => {
+                        *best_action = entry.best_move;
+                        return entry.value;
+                    }
+                    TTEntryType::Lower => {
+                        if entry.value >= beta {
+                            return entry.value;
+                        }
+                    }
+                    TTEntryType::Upper => {
+                        if entry.value <= alpha {
+                            return entry.value;
+                        }
+                    }
+                }
+            }
+        }
+
+        if depth == 0 {
+            return quiescence(board, thread_ctx, shared_tt, alpha, beta, side, 0, time_ctx);
+        }
+
+        let mut moves = generate_legal_moves(board, side);
+        if moves.is_empty() {
+            return if is_in_check {
+                -100000 + (MAX_DEPTH - depth) as i32
+            } else {
+                0
+            };
+        }
+
+        let is_endgame = evaluate(board, side).abs() < ENDGAME_THRESHOLD;
+        if !pv_node && !is_in_check && !is_endgame && depth >= NULL_MOVE_REDUCTION + 1 {
+            let zobrist = get_zobrist();
+            board.zobrist_key ^= zobrist.side;
+            board.current_side = board.current_side.opponent();
+
+            let null_depth = depth - 1 - NULL_MOVE_REDUCTION;
+            let null_eval = -zw_search(
+                board, thread_ctx, shared_tt, null_depth, -alpha,
+                side.opponent(), false, &mut None, time_ctx, extension_count, None
+            );
+
+            board.zobrist_key ^= zobrist.side;
+            board.current_side = board.current_side.opponent();
+
+            if null_eval >= beta && !time_ctx.is_time_up() {
+                return beta;
+            }
+        }
+
+        if !pv_node && !is_in_check && depth <= 3 {
+            let static_eval = evaluate(board, side);
+            let futility_margin = FUTILITY_MARGIN * depth as i32;
+            if static_eval + futility_margin <= alpha {
+                return static_eval;
+            }
+        }
+
+        let tt_move = shared_tt.probe(key).and_then(|e| e.best_move);
+        thread_ctx.sort_moves(&mut moves, tt_move, prev_action, depth, is_in_check, board);
+
+        let mut best_eval = -i32::MAX;
+        let mut current_best_move = None;
+        let mut has_pv = false;
+
+        for (move_idx, action) in moves.iter().enumerate() {
+            let gives_check = action.is_check;
+            let mut extension = 0;
+            if (gives_check || is_in_check) && extension_count < MAX_CHECK_EXTENSION {
+                extension = 1;
+            }
+            let new_extension_count = if gives_check || is_in_check {
+                extension_count + 1
+            } else {
+                extension_count
+            };
+            if new_extension_count > MAX_TOTAL_EXTENSION {
+                extension = 0;
+            }
+            let new_depth = depth - 1 + extension;
+
+            board.make_move(*action);
+
+            let mut eval;
+            if has_pv && !pv_node && !is_in_check && !gives_check && action.captured.is_none() && move_idx >= LMR_MIN_MOVES && depth >= 3 {
+                let reduced_depth = depth - 2;
+                eval = -zw_search(
+                    board, thread_ctx, shared_tt, reduced_depth, -alpha,
+                    side.opponent(), false, &mut None, time_ctx, new_extension_count, Some(*action)
+                );
+                if eval > alpha && !time_ctx.is_time_up() {
+                    eval = -zw_search(
+                        board, thread_ctx, shared_tt, new_depth, -alpha,
+                        side.opponent(), true, &mut None, time_ctx, new_extension_count, Some(*action)
+                    );
+                }
+            } else {
+                eval = -zw_search(
+                    board, thread_ctx, shared_tt, new_depth, -alpha,
+                    side.opponent(), !has_pv && pv_node, &mut None, time_ctx, new_extension_count, Some(*action)
+                );
+            }
+
+            board.undo_move(*action);
+
+            if time_ctx.is_time_up() {
+                return best_eval.max(alpha);
+            }
+
+            if eval > best_eval {
+                best_eval = eval;
+                current_best_move = Some(*action);
+                *best_action = Some(*action);
+            }
+
+            if eval >= beta {
+                if action.captured.is_none() {
+                    thread_ctx.update_killer(*action, depth);
+                    thread_ctx.update_history(*action, depth);
+                    if let Some(pa) = prev_action {
+                        thread_ctx.update_counter(pa, *action);
+                    }
+                }
+                break;
+            }
+
+            if eval > alpha {
+                alpha = eval;
+                has_pv = true;
+            }
+        }
+
+        let entry_type = if best_eval <= original_alpha {
+            TTEntryType::Upper
+        } else if best_eval >= beta {
+            TTEntryType::Lower
+        } else {
+            TTEntryType::Exact
+        };
+        shared_tt.store(key, depth, best_eval, entry_type, current_best_move);
+
+        best_eval
+    }
+
+    pub fn mtdf(
+        board: &mut Board,
+        thread_ctx: &mut ThreadContext,
+        shared_tt: &SharedTT,
+        max_depth: u8,
+        first_guess: i32,
+        side: Color,
+        best_action: &mut Option<Action>,
+        time_ctx: &TimeContext,
+    ) -> i32 {
+        let mut lower_bound = -100000;
+        let mut upper_bound = 100000;
+        let mut guess = first_guess;
+        let mut current_best = None;
+
+        while lower_bound < upper_bound && !time_ctx.is_time_up() {
+            let beta = if guess == lower_bound { guess + 1 } else { guess };
+            let mut temp_best = None;
+
+            let value = zw_search(
+                board, thread_ctx, shared_tt, max_depth, beta,
+                side, true, &mut temp_best, time_ctx, 0, None
+            );
+
+            if value < beta {
+                upper_bound = value;
+            } else {
+                lower_bound = value;
+            }
+            guess = value;
+
+            if temp_best.is_some() {
+                current_best = temp_best;
+            }
+        }
+
+        *best_action = current_best;
+        guess
+    }
+
+    pub fn search_with_aspiration(
+        board: &mut Board,
+        thread_ctx: &mut ThreadContext,
+        shared_tt: &SharedTT,
+        depth: u8,
+        prev_score: i32,
+        side: Color,
+        best_action: &mut Option<Action>,
+        time_ctx: &TimeContext,
+    ) -> i32 {
+        if depth <= 1 || prev_score == 0 {
+            return mtdf(board, thread_ctx, shared_tt, depth, 0, side, best_action, time_ctx);
+        }
+
+        let mut alpha = -100000;
+        let mut beta = 100000;
+        let mut score = prev_score;
+        let mut window = ASPIRATION_WINDOW;
+
+        loop {
+            let mut current_best = None;
+            let low = (score - window).max(alpha);
+            let high = (score + window).min(beta);
+
+            let mut mtdf_guess = score;
+            let mut mtdf_lower = low;
+            let mut mtdf_upper = high;
+
+            while mtdf_lower < mtdf_upper && !time_ctx.is_time_up() {
+                let beta_val = if mtdf_guess == mtdf_lower { mtdf_guess + 1 } else { mtdf_guess };
+                let mut temp_best = None;
+
+                let value = zw_search(
+                    board, thread_ctx, shared_tt, depth, beta_val,
+                    side, true, &mut temp_best, time_ctx, 0, None
+                );
+
+                if value < beta_val {
+                    mtdf_upper = value;
+                } else {
+                    mtdf_lower = value;
+                }
+                mtdf_guess = value;
+
+                if temp_best.is_some() {
+                    current_best = temp_best;
+                }
+            }
+
+            score = mtdf_guess;
+
+            if score <= low {
+                window *= 2;
+                beta = low;
+            } else if score >= high {
+                window *= 2;
+                alpha = high;
+            } else {
+                *best_action = current_best;
+                return score;
+            }
+
+            if window > 1000 {
+                return mtdf(board, thread_ctx, shared_tt, depth, 0, side, best_action, time_ctx);
+            }
+        }
+    }
+
+    fn worker_thread(
+        mut board: Board,
+        shared_tt: SharedTT,
+        time_ctx: TimeContext,
+        thread_id: usize,
+        result_sender: std::sync::mpsc::Sender<(u8, i32, Option<Action>)>,
+    ) {
+        let mut thread_ctx = ThreadContext::new();
+        let mut last_guess = 0;
+        let side = board.current_side;
+
+        let start_depth = if thread_id == 0 { 1 } else { thread_id as u8 % 3 + 1 };
+
+        for depth in start_depth..=MAX_DEPTH {
+            if time_ctx.is_time_up() {
+                break;
+            }
+
+            let mut current_best = None;
+            let score = search_with_aspiration(
+                &mut board, &mut thread_ctx, &shared_tt,
+                depth, last_guess, side, &mut current_best, &time_ctx
+            );
+
+            if !time_ctx.is_time_up() {
+                last_guess = score;
+                thread_ctx.age_tables();
+                let _ = result_sender.send((depth, score, current_best));
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn find_best_move(board: &mut Board, _max_depth: u8, side: Color) -> Option<Action> {
         let legal_moves = generate_legal_moves(board, side);
         if legal_moves.is_empty() {
             return None;
         }
 
-        let mut ctx = SearchContext::new();
-        let mut best_action = None;
+        let shared_tt = SharedTT::new();
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let nodes_searched = Arc::new(AtomicU64::new(0));
+        let time_ctx = TimeContext {
+            start_time: Instant::now(),
+            time_limit: Duration::from_millis(SEARCH_TIMEOUT_MS),
+            stop_flag: Arc::clone(&stop_flag),
+            nodes_searched: Arc::clone(&nodes_searched),
+        };
+
+        let (result_sender, result_receiver) = std::sync::mpsc::channel();
+        let mut handles = Vec::with_capacity(SEARCH_THREADS);
+
+        for thread_id in 0..SEARCH_THREADS {
+            let board_clone = board.clone();
+            let tt_clone = shared_tt.clone();
+            let time_ctx_clone = time_ctx.clone();
+            let sender_clone = result_sender.clone();
+
+            let handle = thread::spawn(move || {
+                worker_thread(board_clone, tt_clone, time_ctx_clone, thread_id, sender_clone);
+            });
+            handles.push(handle);
+        }
 
         let stop_flag_clone = Arc::clone(&stop_flag);
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(SEARCH_TIMEOUT_MS));
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(SEARCH_TIMEOUT_MS));
             stop_flag_clone.store(true, Ordering::Relaxed);
         });
 
-        for depth in 1..=max_depth {
-            let mut current_best = None;
-            let _ = pvs(board, &mut ctx, depth, -100000, 100000, side, true, &mut current_best, &stop_flag, 0);
+        let mut best_depth = 0;
+        let mut best_score = -100000;
+        let mut final_best_action = legal_moves.first().copied();
 
-            if stop_flag.load(Ordering::Relaxed) {
-                break;
-            }
-
-            if let Some(_m) = current_best {
-                best_action = current_best;
+        while !time_ctx.is_time_up() {
+            match result_receiver.recv_timeout(Duration::from_millis(100)) {
+                Ok((depth, score, action)) => {
+                    if depth > best_depth || (depth == best_depth && score > best_score) {
+                        best_depth = depth;
+                        best_score = score;
+                        if let Some(m) = action {
+                            final_best_action = Some(m);
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             }
         }
 
-        if best_action.is_none() {
-            best_action = legal_moves.first().copied();
+        stop_flag.store(true, Ordering::Relaxed);
+        for handle in handles {
+            let _ = handle.join();
         }
 
-        best_action
+        final_best_action
     }
 }
 
