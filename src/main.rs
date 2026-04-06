@@ -3,6 +3,10 @@ use std::io;
 use std::io::Write;
 use std::sync::OnceLock;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+use std::thread;
 
 pub const BOARD_WIDTH: i8 = 9;
 pub const BOARD_HEIGHT: i8 = 10;
@@ -125,8 +129,8 @@ impl Coord {
     pub fn in_palace(self, color: Color) -> bool {
         let x_ok = self.x >= 3 && self.x <= 5;
         let y_ok = match color {
-            Color::Black => self.y <= 2,
             Color::Red => self.y >= 7,
+            Color::Black => self.y <= 2,
         };
         x_ok && y_ok
     }
@@ -134,9 +138,24 @@ impl Coord {
     #[inline(always)]
     pub fn crosses_river(self, color: Color) -> bool {
         match color {
-            Color::Black => self.y >= 5,
             Color::Red => self.y <= 4,
+            Color::Black => self.y >= 5,
         }
+    }
+
+    #[inline(always)]
+    pub fn in_core_area(self, color: Color) -> bool {
+        let x_ok = self.x >= 3 && self.x <= 5;
+        let y_ok = match color {
+            Color::Red => self.y >= 4 && self.y <= 7,
+            Color::Black => self.y >= 2 && self.y <= 5,
+        };
+        x_ok && y_ok
+    }
+
+    #[inline(always)]
+    pub fn distance_to(self, other: Coord) -> i32 {
+        (self.x - other.x).abs() as i32 + (self.y - other.y).abs() as i32
     }
 }
 
@@ -282,6 +301,429 @@ impl TranspositionTable {
         if entry.key == key {
             Some(entry)
         } else {
+            None
+        }
+    }
+}
+
+pub mod book {
+    use super::*;
+    use std::collections::HashMap;
+
+    pub struct OpeningBook {
+        book: HashMap<u64, Vec<(Action, i32)>>,
+    }
+
+    impl OpeningBook {
+        pub fn new() -> Self {
+            let mut book = OpeningBook {
+                book: HashMap::new(),
+            };
+            book.init_all_openings();
+            book
+        }
+
+        fn init_all_openings(&mut self) {
+            self.init_dang_tou_pao();
+            self.init_shun_pao();
+            self.init_lie_pao();
+            self.init_fei_xiang();
+            self.init_qi_ma();
+            self.init_guo_gong_pao();
+            self.init_xian_ren_zhi_lu();
+        }
+
+        fn init_dang_tou_pao(&mut self) {
+            let mut board = Board::new(RuleSet::Official, 1);
+            let key = board.zobrist_key;
+            // 红方炮二平五 (7,7)->(4,7)
+            let a1 = Action::new(Coord::new(7, 7), Coord::new(4, 7), None);
+            self.book.insert(key, vec![(a1, 1000)]);
+
+            board.make_move(a1);
+            let key = board.zobrist_key;
+            // 黑方马8进7 (7,0)->(6,2)
+            let a2 = Action::new(Coord::new(7, 0), Coord::new(6, 2), None);
+            self.book.insert(key, vec![(a2, 1000)]);
+
+            board.make_move(a2);
+            let key = board.zobrist_key;
+            // 红方马八进七 (1,9)->(2,7)
+            let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
+            self.book.insert(key, vec![(a3, 1000)]);
+
+            board.make_move(a3);
+            // 黑方马2进3 (1,0)->(2,2)
+            let a4 = Action::new(Coord::new(1, 0), Coord::new(2, 2), None);
+            self.book.insert(board.zobrist_key, vec![(a4, 1000)]);
+
+            board.make_move(a4);
+            // 红方车九平八 (0,9)->(0,8)
+            let a5_main = Action::new(Coord::new(0, 9), Coord::new(0, 8), None);
+            // 红方兵五进一 (4,6)->(4,5)
+            let a5_wuqi = Action::new(Coord::new(4, 6), Coord::new(4, 5), None);
+            self.book.insert(board.zobrist_key, vec![(a5_main, 800), (a5_wuqi, 200)]);
+
+            let mut board_main = board.clone();
+            board_main.make_move(a5_main);
+            // 黑方车1平2 (8,0)->(8,1)
+            let a6 = Action::new(Coord::new(8, 0), Coord::new(8, 1), None);
+            self.book.insert(board_main.zobrist_key, vec![(a6, 1000)]);
+        }
+
+        fn init_shun_pao(&mut self) {
+            let mut board = Board::new(RuleSet::Official, 1);
+            let key = board.zobrist_key;
+            // 红方炮二平五 (7,7)->(4,7)
+            let a1 = Action::new(Coord::new(7, 7), Coord::new(4, 7), None);
+            if !self.book.contains_key(&key) {
+                self.book.insert(key, vec![(a1, 500)]);
+            }
+
+            board.make_move(a1);
+            let key = board.zobrist_key;
+            // 黑方炮8平5 (7,0)->(4,0)
+            let a2 = Action::new(Coord::new(7, 0), Coord::new(4, 0), None);
+            self.book.insert(key, vec![(a2, 600)]);
+
+            board.make_move(a2);
+            let key = board.zobrist_key;
+            // 红方马八进七 (1,9)->(2,7)
+            let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
+            self.book.insert(key, vec![(a3, 1000)]);
+
+            board.make_move(a3);
+            let key = board.zobrist_key;
+            // 黑方车1进1 (8,0)->(8,1)
+            let a4 = Action::new(Coord::new(8, 0), Coord::new(8, 1), None);
+            self.book.insert(key, vec![(a4, 1000)]);
+
+            board.make_move(a4);
+            let key = board.zobrist_key;
+            // 红方车九平八 (0,9)->(0,8)
+            let a5 = Action::new(Coord::new(0, 9), Coord::new(0, 8), None);
+            self.book.insert(key, vec![(a5, 1000)]);
+        }
+
+        fn init_lie_pao(&mut self) {
+            let mut board = Board::new(RuleSet::Official, 1);
+            let _key = board.zobrist_key;
+            // 红方炮二平五 (7,7)->(4,7)
+            let a1 = Action::new(Coord::new(7, 7), Coord::new(4, 7), None);
+
+            board.make_move(a1);
+            let _key = board.zobrist_key;
+            // 黑方马8进7 (7,0)->(6,2)
+            let a2 = Action::new(Coord::new(7, 0), Coord::new(6, 2), None);
+
+            board.make_move(a2);
+            let _key = board.zobrist_key;
+            // 红方马八进七 (1,9)->(2,7)
+            let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
+
+            board.make_move(a3);
+            let key = board.zobrist_key;
+            // 黑方炮2平5 (1,0)->(4,0)
+            let a4_lie = Action::new(Coord::new(1, 0), Coord::new(4, 0), None);
+            // 黑方马2进3 (1,0)->(2,2)
+            let a4_normal = Action::new(Coord::new(1, 0), Coord::new(2, 2), None);
+            self.book.insert(key, vec![(a4_normal, 700), (a4_lie, 300)]);
+        }
+
+        fn init_fei_xiang(&mut self) {
+            let mut board = Board::new(RuleSet::Official, 1);
+            let key = board.zobrist_key;
+            // 红方相三进五 (6,9)->(4,7)
+            let a1 = Action::new(Coord::new(6, 9), Coord::new(4, 7), None);
+            if let Some(mut existing) = self.book.remove(&key) {
+                existing.push((a1, 400));
+                self.book.insert(key, existing);
+            } else {
+                self.book.insert(key, vec![(a1, 400)]);
+            }
+
+            board.make_move(a1);
+            let key = board.zobrist_key;
+            // 黑方炮8平5 (7,0)->(4,0)
+            let a2 = Action::new(Coord::new(7, 0), Coord::new(4, 0), None);
+            self.book.insert(key, vec![(a2, 600)]);
+
+            board.make_move(a2);
+            let key = board.zobrist_key;
+            // 红方马八进七 (1,9)->(2,7)
+            let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
+            self.book.insert(key, vec![(a3, 1000)]);
+        }
+
+        fn init_qi_ma(&mut self) {
+            let mut board = Board::new(RuleSet::Official, 1);
+            let key = board.zobrist_key;
+            // 红方马八进七 (1,9)->(2,7)
+            let a1 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
+            if let Some(existing) = self.book.get_mut(&key) {
+                existing.push((a1, 300));
+            } else {
+                self.book.insert(key, vec![(a1, 300)]);
+            }
+
+            board.make_move(a1);
+            let key = board.zobrist_key;
+            // 黑方卒7进1 (6,3)->(6,4)
+            let a2 = Action::new(Coord::new(6, 3), Coord::new(6, 4), None);
+            self.book.insert(key, vec![(a2, 1000)]);
+
+            board.make_move(a2);
+            let key = board.zobrist_key;
+            // 修正：红方兵三进一 (6,6)->(6,5)
+            let a3 = Action::new(Coord::new(6, 6), Coord::new(6, 5), None);
+            self.book.insert(key, vec![(a3, 1000)]);
+        }
+
+        fn init_guo_gong_pao(&mut self) {
+            let mut board = Board::new(RuleSet::Official, 1);
+            let key = board.zobrist_key;
+            // 红方炮八平七 (1,7)->(3,7)
+            let a1 = Action::new(Coord::new(1, 7), Coord::new(3, 7), None);
+            if let Some(existing) = self.book.get_mut(&key) {
+                existing.push((a1, 200));
+            } else {
+                self.book.insert(key, vec![(a1, 200)]);
+            }
+
+            board.make_move(a1);
+            let key = board.zobrist_key;
+            // 黑方马8进7 (7,0)->(6,2)
+            let a2 = Action::new(Coord::new(7, 0), Coord::new(6, 2), None);
+            self.book.insert(key, vec![(a2, 1000)]);
+
+            board.make_move(a2);
+            let key = board.zobrist_key;
+            // 红方马八进七 (1,9)->(2,7)
+            let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
+            self.book.insert(key, vec![(a3, 1000)]);
+        }
+
+        fn init_xian_ren_zhi_lu(&mut self) {
+            let mut board = Board::new(RuleSet::Official, 1);
+            let key = board.zobrist_key;
+            // 修正：红方兵三进一 (6,6)->(6,5)
+            let a1 = Action::new(Coord::new(6, 6), Coord::new(6, 5), None);
+            if let Some(existing) = self.book.get_mut(&key) {
+                existing.iter_mut().for_each(|(_, w)| *w = *w * 2 / 3);
+                existing.push((a1, 1000));
+            } else {
+                self.book.insert(key, vec![(a1, 1000)]);
+            }
+
+            board.make_move(a1);
+            let key = board.zobrist_key;
+            // 黑方卒7进1 (6,3)->(6,4)
+            let a2 = Action::new(Coord::new(6, 3), Coord::new(6, 4), None);
+            self.book.insert(key, vec![(a2, 700)]);
+
+            board.make_move(a2);
+            let key = board.zobrist_key;
+            // 红方炮八平五 (1,7)->(4,7)
+            let a3 = Action::new(Coord::new(1, 7), Coord::new(4, 7), None);
+            self.book.insert(key, vec![(a3, 1000)]);
+        }
+
+        pub fn probe(&self, board: &Board) -> Option<Action> {
+            if let Some(moves) = self.book.get(&board.zobrist_key) {
+                if moves.is_empty() {
+                    return None;
+                }
+
+                let max_weight = moves.iter().map(|(_, w)| *w).max().unwrap_or(0);
+                let candidates: Vec<&(Action, i32)> = moves.iter().filter(|(_, w)| *w == max_weight).collect();
+
+                if candidates.is_empty() {
+                    return None;
+                }
+
+                if candidates.len() == 1 {
+                    return Some(candidates[0].0);
+                }
+
+                let seed = (board.zobrist_key & 0xFFFF) as usize + (board.move_history.len() % 2) * 0x8000;
+                let idx = seed % candidates.len();
+                Some(candidates[idx].0)
+            } else {
+                None
+            }
+        }
+    }
+
+    pub struct EndgameTablebase;
+
+    impl EndgameTablebase {
+        #[inline(always)]
+        fn check_double_chariot_vs_single(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<i32> {
+            if red[PieceType::King as usize] == 1
+                && red[PieceType::Chariot as usize] == 2
+                && red_other == 2
+                && black[PieceType::King as usize] == 1
+                && black[PieceType::Chariot as usize] == 1
+                && black_other >= 1 && black_other <= 4
+            {
+                let score = 85000;
+                return Some(if side == Color::Red { score } else { -score });
+            }
+            None
+        }
+
+        #[inline(always)]
+        fn check_chariot_cannon_vs_chariot(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<i32> {
+            if red[PieceType::King as usize] == 1
+                && red[PieceType::Chariot as usize] == 1
+                && red[PieceType::Cannon as usize] == 1
+                && red_other == 2
+                && black[PieceType::King as usize] == 1
+                && black[PieceType::Chariot as usize] == 1
+                && black_other == 1
+            {
+                let score = 78000;
+                return Some(if side == Color::Red { score } else { -score });
+            }
+            None
+        }
+
+        #[inline(always)]
+        fn check_pawn_vs_advisor(board: &Board, red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<i32> {
+            if red[PieceType::King as usize] == 1
+                && red[PieceType::Pawn as usize] == 1
+                && red_other == 1
+                && black[PieceType::King as usize] == 1
+                && black[PieceType::Advisor as usize] == 1
+                && black_other == 1
+            {
+                let mut pawn_pos = None;
+                for y in 0..10 {
+                    for x in 0..9 {
+                        if let Some(p) = board.cells[y][x] {
+                            if p.color == Color::Red && p.piece_type == PieceType::Pawn {
+                                pawn_pos = Some(Coord::new(x as i8, y as i8));
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(pos) = pawn_pos {
+                    if pos.crosses_river(Color::Red) {
+                        let score = 80000;
+                        return Some(if side == Color::Red { score } else { -score });
+                    }
+                }
+            }
+            None
+        }
+
+        #[inline(always)]
+        fn check_horse_cannon_vs_double_advisor(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<i32> {
+            if red[PieceType::King as usize] == 1
+                && red[PieceType::Horse as usize] == 1
+                && red[PieceType::Cannon as usize] == 1
+                && red_other == 2
+                && black[PieceType::King as usize] == 1
+                && black[PieceType::Advisor as usize] == 2
+                && black_other == 2
+            {
+                let score = 72000;
+                return Some(if side == Color::Red { score } else { -score });
+            }
+            None
+        }
+
+        #[inline(always)]
+        fn check_horse_vs_advisor(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<i32> {
+            if red[PieceType::King as usize] == 1
+                && red[PieceType::Horse as usize] == 1
+                && red_other == 1
+                && black[PieceType::King as usize] == 1
+                && black[PieceType::Advisor as usize] == 1
+                && black_other == 1
+            {
+                let score = 68000;
+                return Some(if side == Color::Red { score } else { -score });
+            }
+            None
+        }
+
+        #[inline(always)]
+        fn check_cannon_advisor_vs_advisor(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<i32> {
+            if red[PieceType::King as usize] == 1
+                && red[PieceType::Cannon as usize] == 1
+                && red[PieceType::Advisor as usize] == 1
+                && red_other == 2
+                && black[PieceType::King as usize] == 1
+                && black[PieceType::Advisor as usize] == 1
+                && black_other == 1
+            {
+                let score = 70000;
+                return Some(if side == Color::Red { score } else { -score });
+            }
+            None
+        }
+
+        #[inline(always)]
+        fn check_chariot_vs_defense(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<i32> {
+            if red[PieceType::King as usize] == 1
+                && red[PieceType::Chariot as usize] == 1
+                && red_other == 1
+                && black[PieceType::King as usize] == 1
+            {
+                if (black[PieceType::Horse as usize] == 1 && black_other == 1)
+                    || (black[PieceType::Cannon as usize] == 1 && black_other == 1)
+                    || (black[PieceType::Advisor as usize] == 2 && black_other == 2)
+                    || (black[PieceType::Elephant as usize] == 2 && black_other == 2)
+                {
+                    let score = 75000;
+                    return Some(if side == Color::Red { score } else { -score });
+                }
+            }
+            None
+        }
+
+        pub fn probe(board: &Board, side: Color) -> Option<i32> {
+            let mut red = [0; 7];
+            let mut black = [0; 7];
+            for y in 0..10 {
+                for x in 0..9 {
+                    if let Some(p) = board.cells[y][x] {
+                        match p.color {
+                            Color::Red => red[p.piece_type as usize] += 1,
+                            Color::Black => black[p.piece_type as usize] += 1,
+                        }
+                    }
+                }
+            }
+
+            let red_other = red.iter().skip(1).sum::<i32>();
+            let black_other = black.iter().skip(1).sum::<i32>();
+
+            if let Some(score) = Self::check_double_chariot_vs_single(&red, &black, red_other, black_other, side) {
+                return Some(score);
+            }
+            if let Some(score) = Self::check_chariot_cannon_vs_chariot(&red, &black, red_other, black_other, side) {
+                return Some(score);
+            }
+            if let Some(score) = Self::check_pawn_vs_advisor(board, &red, &black, red_other, black_other, side) {
+                return Some(score);
+            }
+            if let Some(score) = Self::check_horse_cannon_vs_double_advisor(&red, &black, red_other, black_other, side) {
+                return Some(score);
+            }
+            if let Some(score) = Self::check_horse_vs_advisor(&red, &black, red_other, black_other, side) {
+                return Some(score);
+            }
+            if let Some(score) = Self::check_cannon_advisor_vs_advisor(&red, &black, red_other, black_other, side) {
+                return Some(score);
+            }
+            if let Some(score) = Self::check_chariot_vs_defense(&red, &black, red_other, black_other, side) {
+                return Some(score);
+            }
+
             None
         }
     }
@@ -574,7 +1016,7 @@ pub mod movegen {
 
         for y in 0..BOARD_HEIGHT {
             for x in 0..BOARD_WIDTH {
-                let pos = Coord::new(x, y);
+                let pos = Coord::new(x as i8, y as i8);
                 if let Some(piece) = board.get(pos) {
                     if piece.color != side {
                         continue;
@@ -704,7 +1146,12 @@ impl Board {
     }
 
     pub fn make_move(&mut self, mut action: Action) {
-        let piece = self.get(action.src).unwrap();
+        // 安全检查：保留警告输出
+        let Some(piece) = self.get(action.src) else {
+            eprintln!("Warning: Invalid move from empty square {:?}", action.src);
+            return;
+        };
+
         self.set_internal(action.tar, Some(piece));
         self.set_internal(action.src, None);
 
@@ -986,204 +1433,557 @@ impl fmt::Display for Board {
 
 pub mod eval {
     use super::*;
+    use super::book::EndgameTablebase;
 
-    const BASE_VALUE_MIDGAME: [i32; 7] = [10000, 110, 110, 70, 320, 320, 600];
-    const BASE_VALUE_ENDGAME: [i32; 7] = [10000, 110, 110, 150, 300, 200, 650];
+    const MG_VALUE: [i32; 7] = [10000, 120, 120, 80, 350, 350, 650];
+    const EG_VALUE: [i32; 7] = [10000, 120, 120, 200, 300, 250, 700];
 
-    const PST_KING_RED: [[i32; 9]; 10] = [
+    const MG_PST_KING: [[i32; 9]; 10] = [
+        [0, 0, 0, 20, 40, 20, 0, 0, 0],
+        [0, 0, 0, 30, 50, 30, 0, 0, 0],
+        [0, 0, 0, 20, 40, 20, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 1, 1, 1, 0, 0, 0],
-        [0, 0, 0, 2, 3, 2, 0, 0, 0],
-        [0, 0, 0, 10, 15, 10, 0, 0, 0],
+        [0, 0, 0, 20, 40, 20, 0, 0, 0],
+        [0, 0, 0, 30, 50, 30, 0, 0, 0],
+        [0, 0, 0, 20, 40, 20, 0, 0, 0],
     ];
 
-    const PST_ADVISOR_RED: [[i32; 9]; 10] = [
+    const MG_PST_ADVISOR: [[i32; 9]; 10] = [
+        [0, 0, 0, 30, 0, 30, 0, 0, 0],
+        [0, 0, 0, 0, 40, 0, 0, 0, 0],
+        [0, 0, 0, 30, 0, 30, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 20, 0, 20, 0, 0, 0],
-        [0, 0, 0, 0, 20, 0, 0, 0, 0],
+        [0, 0, 0, 30, 0, 30, 0, 0, 0],
+        [0, 0, 0, 0, 40, 0, 0, 0, 0],
+        [0, 0, 0, 30, 0, 30, 0, 0, 0],
     ];
 
-    const PST_ELEPHANT_RED: [[i32; 9]; 10] = [
+    const MG_PST_ELEPHANT: [[i32; 9]; 10] = [
+        [0, 0, 10, 0, 0, 0, 10, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [5, 0, 20, 0, 30, 0, 20, 0, 5],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 25, 0, 40, 0, 25, 0, 0],
+        [0, 0, 25, 0, 40, 0, 25, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [5, 0, 20, 0, 30, 0, 20, 0, 5],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 10, 0, 0, 0, 10, 0, 0],
+    ];
+
+    const MG_PST_HORSE: [[i32; 9]; 10] = [
+        [5, 10, 20, 20, 20, 20, 20, 10, 5],
+        [5, 15, 30, 40, 50, 40, 30, 15, 5],
+        [10, 30, 50, 70, 80, 70, 50, 30, 10],
+        [20, 40, 60, 80, 90, 80, 60, 40, 20],
+        [10, 30, 50, 70, 80, 70, 50, 30, 10],
+        [10, 30, 50, 70, 80, 70, 50, 30, 10],
+        [20, 40, 60, 80, 90, 80, 60, 40, 20],
+        [10, 30, 50, 70, 80, 70, 50, 30, 10],
+        [5, 15, 30, 40, 50, 40, 30, 15, 5],
+        [5, 10, 20, 20, 20, 20, 20, 10, 5],
+    ];
+
+    const MG_PST_CHARIOT: [[i32; 9]; 10] = [
+        [10, 20, 30, 40, 50, 40, 30, 20, 10],
+        [20, 30, 40, 50, 60, 50, 40, 30, 20],
+        [30, 40, 50, 60, 70, 60, 50, 40, 30],
+        [40, 50, 60, 80, 90, 80, 60, 50, 40],
+        [30, 40, 50, 70, 80, 70, 50, 40, 30],
+        [30, 40, 50, 70, 80, 70, 50, 40, 30],
+        [40, 50, 60, 80, 90, 80, 60, 50, 40],
+        [30, 40, 50, 60, 70, 60, 50, 40, 30],
+        [20, 30, 40, 50, 60, 50, 40, 30, 20],
+        [10, 20, 30, 40, 50, 40, 30, 20, 10],
+    ];
+
+    const MG_PST_CANNON: [[i32; 9]; 10] = [
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 20, 0, 0, 0, 20, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [20, 0, 0, 0, 20, 0, 0, 0, 20],
+        [10, 20, 30, 40, 50, 40, 30, 20, 10],
+        [30, 40, 50, 60, 70, 60, 50, 40, 30],
+        [40, 50, 60, 80, 90, 80, 60, 50, 40],
+        [30, 40, 50, 70, 80, 70, 50, 40, 30],
+        [30, 40, 50, 70, 80, 70, 50, 40, 30],
+        [40, 50, 60, 80, 90, 80, 60, 50, 40],
+        [30, 40, 50, 60, 70, 60, 50, 40, 30],
+        [10, 20, 30, 40, 50, 40, 30, 20, 10],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
     ];
 
-    const PST_HORSE_RED: [[i32; 9]; 10] = [
+    const MG_PST_PAWN: [[i32; 9]; 10] = [
+        [140, 160, 180, 200, 220, 200, 180, 160, 140],
+        [120, 140, 160, 180, 200, 180, 160, 140, 120],
+        [100, 120, 140, 160, 180, 160, 140, 120, 100],
+        [80, 100, 120, 140, 160, 140, 120, 100, 80],
+        [60, 80, 100, 120, 140, 120, 100, 80, 60],
+        [30, 40, 50, 60, 70, 60, 50, 40, 30],
+        [10, 20, 30, 40, 50, 40, 30, 20, 10],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [10, 20, 30, 30, 30, 30, 30, 20, 10],
-        [20, 30, 50, 50, 50, 50, 50, 30, 20],
-        [10, 20, 30, 40, 40, 40, 30, 20, 10],
-        [10, 10, 20, 20, 20, 20, 20, 10, 10],
-    ];
-
-    const PST_CHARIOT_RED: [[i32; 9]; 10] = [
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [20, 20, 20, 20, 20, 20, 20, 20, 20],
-        [30, 40, 40, 40, 40, 40, 40, 40, 30],
-        [10, 10, 20, 30, 30, 30, 20, 10, 10],
-        [10, 20, 20, 30, 30, 30, 20, 20, 10],
-    ];
-
-    const PST_CANNON_RED: [[i32; 9]; 10] = [
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [10, 10, 10, 20, 20, 20, 10, 10, 10],
-        [10, 20, 20, 20, 20, 20, 20, 20, 10],
-        [5, 10, 10, 15, 15, 15, 10, 10, 5],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
     ];
 
-    const PST_PAWN_RED: [[i32; 9]; 10] = [
+    const EG_PST_KING: [[i32; 9]; 10] = [
+        [0, 0, 0, 20, 40, 20, 0, 0, 0],
+        [0, 0, 0, 30, 50, 30, 0, 0, 0],
+        [0, 0, 0, 20, 40, 20, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 20, 40, 20, 0, 0, 0],
+        [0, 0, 0, 30, 50, 30, 0, 0, 0],
+        [0, 0, 0, 20, 40, 20, 0, 0, 0],
+    ];
+
+    const EG_PST_PAWN: [[i32; 9]; 10] = [
+        [300, 350, 400, 450, 500, 450, 400, 350, 300],
+        [280, 320, 380, 420, 480, 420, 380, 320, 280],
+        [250, 300, 350, 400, 450, 400, 350, 300, 250],
+        [200, 250, 300, 350, 400, 350, 300, 250, 200],
+        [150, 200, 250, 300, 350, 300, 250, 200, 150],
+        [100, 120, 150, 180, 200, 180, 150, 120, 100],
+        [50, 80, 100, 120, 150, 120, 100, 80, 50],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [90, 90, 90, 110, 130, 110, 90, 90, 90],
-        [70, 70, 70, 90, 110, 90, 70, 70, 70],
-        [50, 50, 50, 70, 90, 70, 50, 50, 50],
-        [30, 30, 30, 30, 30, 30, 30, 30, 30],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
     ];
+
+    const PHASE_WEIGHTS: [i32; 7] = [0, 1, 1, 1, 4, 4, 8];
+    const TOTAL_PHASE: i32 = 2 * (1 + 1 + 1 + 4 + 4 + 8);
 
     fn game_phase(board: &Board) -> f32 {
-        let mut total_material = 0;
+        let mut phase = 0;
         for y in 0..10 {
             for x in 0..9 {
                 if let Some(p) = board.cells[y][x] {
-                    if p.piece_type != PieceType::King {
-                        total_material += BASE_VALUE_MIDGAME[p.piece_type as usize];
+                    phase += PHASE_WEIGHTS[p.piece_type as usize];
+                }
+            }
+        }
+        (phase as f32 / TOTAL_PHASE as f32).clamp(0.0, 1.0)
+    }
+
+    #[inline(always)]
+    fn pst_val(
+        pt: PieceType,
+        color: Color,
+        x: usize,
+        y: usize,
+        phase: f32,
+    ) -> i32 {
+        let y_mirrored = 9 - y;
+        let (y_mg, y_eg) = if color == Color::Red {
+            (y, y)
+        } else {
+            (y_mirrored, y_mirrored)
+        };
+
+        let mg = match pt {
+            PieceType::King => MG_PST_KING[y_mg][x],
+            PieceType::Advisor => MG_PST_ADVISOR[y_mg][x],
+            PieceType::Elephant => MG_PST_ELEPHANT[y_mg][x],
+            PieceType::Horse => MG_PST_HORSE[y_mg][x],
+            PieceType::Chariot => MG_PST_CHARIOT[y_mg][x],
+            PieceType::Cannon => MG_PST_CANNON[y_mg][x],
+            PieceType::Pawn => MG_PST_PAWN[y_mg][x],
+        };
+
+        let eg = match pt {
+            PieceType::King => EG_PST_KING[y_eg][x],
+            PieceType::Pawn => EG_PST_PAWN[y_eg][x],
+            _ => mg,
+        };
+
+        (mg as f32 * phase + eg as f32 * (1.0 - phase)) as i32
+    }
+
+    fn center_control(board: &Board, color: Color, phase: f32) -> i32 {
+        let mut control = 0;
+        let _opponent = color.opponent();
+
+        for y in 0..10 {
+            for x in 0..9 {
+                let pos = Coord::new(x as i8, y as i8);
+                if !pos.in_core_area(color) {
+                    continue;
+                }
+
+                let mut our_control = 0;
+                let mut their_control = 0;
+
+                for y2 in 0..10 {
+                    for x2 in 0..9 {
+                        let attacker_pos = Coord::new(x2 as i8, y2 as i8);
+                        if let Some(piece) = board.get(attacker_pos) {
+                            let can_attack = match piece.piece_type {
+                                PieceType::Pawn => movegen::generate_pawn_moves(board, attacker_pos, piece.color).contains(&pos),
+                                PieceType::Horse => movegen::generate_horse_moves(board, attacker_pos, piece.color).contains(&pos),
+                                PieceType::Chariot => movegen::generate_chariot_moves(board, attacker_pos, piece.color).contains(&pos),
+                                PieceType::Cannon => movegen::generate_cannon_moves(board, attacker_pos, piece.color).contains(&pos),
+                                _ => false,
+                            };
+
+                            if can_attack {
+                                let weight = match piece.piece_type {
+                                    PieceType::Chariot | PieceType::Cannon => 3,
+                                    PieceType::Horse | PieceType::Pawn => 2,
+                                    _ => 0,
+                                };
+                                if piece.color == color {
+                                    our_control += weight;
+                                } else {
+                                    their_control += weight;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                control += (our_control - their_control) * color.sign();
+            }
+        }
+
+        (control as f32 * (0.5 + 0.5 * phase)) as i32
+    }
+
+    fn piece_coordination(board: &Board, color: Color, phase: f32) -> i32 {
+        let mut coordination = 0;
+        let (rk, bk) = board.find_kings();
+        let _our_king = match color {
+            Color::Red => rk,
+            Color::Black => bk,
+        };
+        let enemy_king = match color {
+            Color::Red => bk,
+            Color::Black => rk,
+        };
+
+        let mut our_pieces = Vec::new();
+        for y in 0..10 {
+            for x in 0..9 {
+                let pos = Coord::new(x as i8, y as i8);
+                if let Some(piece) = board.get(pos) {
+                    if piece.color == color {
+                        our_pieces.push((piece, pos));
                     }
                 }
             }
         }
-        (total_material - ENDGAME_THRESHOLD).max(0) as f32 / (MIDGAME_THRESHOLD - ENDGAME_THRESHOLD) as f32
+
+        let mut has_horse = false;
+        let mut has_chariot = false;
+        let mut horse_in_attack = false;
+        let mut chariot_in_support = false;
+
+        for (piece, pos) in &our_pieces {
+            match piece.piece_type {
+                PieceType::Horse => {
+                    has_horse = true;
+                    if let Some(ek) = enemy_king {
+                        let dist = pos.distance_to(ek);
+                        if dist <= 3 && pos.crosses_river(color) {
+                            horse_in_attack = true;
+                        }
+                    }
+                }
+                PieceType::Chariot => {
+                    has_chariot = true;
+                    if (pos.x == 3 || pos.x == 4 || pos.x == 5) && pos.in_core_area(color) {
+                        chariot_in_support = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if has_horse && has_chariot && horse_in_attack && chariot_in_support {
+            coordination += 50 * color.sign();
+        }
+
+        for (piece, pos) in &our_pieces {
+            if piece.piece_type == PieceType::Cannon {
+                let dirs = [(0,1), (0,-1), (1,0), (-1,0)];
+                for (dx, dy) in dirs {
+                    let mut x = pos.x + dx;
+                    let mut y = pos.y + dy;
+                    let mut platform_found = false;
+
+                    while x >= 0 && x < 9 && y >= 0 && y < 10 {
+                        let tar = Coord::new(x, y);
+                        if let Some(p) = board.get(tar) {
+                            if !platform_found {
+                                if p.color == color && (p.piece_type == PieceType::Advisor || p.piece_type == PieceType::Elephant || p.piece_type == PieceType::Pawn) {
+                                    coordination += 20 * color.sign();
+                                }
+                                platform_found = true;
+                            } else {
+                                break;
+                            }
+                        }
+                        x += dx;
+                        y += dy;
+                    }
+                }
+            }
+        }
+
+        if our_pieces.len() >= 4 {
+            let mut total_dist = 0;
+            let mut count = 0;
+            for i in 0..our_pieces.len() {
+                for j in i+1..our_pieces.len() {
+                    total_dist += our_pieces[i].1.distance_to(our_pieces[j].1);
+                    count += 1;
+                }
+            }
+            let avg_dist = if count > 0 { total_dist / count } else { 0 };
+            let optimal_dist = 6 + (our_pieces.len() as i32 / 2);
+            let dist_penalty = (avg_dist - optimal_dist).abs();
+            coordination -= dist_penalty * 2 * color.sign();
+        }
+
+        (coordination as f32 * (0.3 + 0.7 * phase)) as i32
     }
 
-    fn position_value(pt: PieceType, color: Color, x: i8, y: i8) -> i32 {
-        let (x_usize, y_usize) = (x as usize, y as usize);
-        let y_mirrored = 9 - y_usize;
+    fn horse_mobility(board: &Board, pos: Coord, color: Color) -> i32 {
+        let deltas = [(2,1,1,0), (2,-1,1,0), (-2,1,-1,0), (-2,-1,-1,0),
+            (1,2,0,1), (1,-2,0,-1), (-1,2,0,1), (-1,-2,0,-1)];
+        let mut mobility = 0;
 
-        let val = match pt {
-            PieceType::King =>
-                if color == Color::Red { PST_KING_RED[y_usize][x_usize] } else { PST_KING_RED[y_mirrored][x_usize] }
-            PieceType::Advisor =>
-                if color == Color::Red { PST_ADVISOR_RED[y_usize][x_usize] } else { PST_ADVISOR_RED[y_mirrored][x_usize] }
-            PieceType::Elephant =>
-                if color == Color::Red { PST_ELEPHANT_RED[y_usize][x_usize] } else { PST_ELEPHANT_RED[y_mirrored][x_usize] }
-            PieceType::Horse =>
-                if color == Color::Red { PST_HORSE_RED[y_usize][x_usize] } else { PST_HORSE_RED[y_mirrored][x_usize] }
-            PieceType::Chariot =>
-                if color == Color::Red { PST_CHARIOT_RED[y_usize][x_usize] } else { PST_CHARIOT_RED[y_mirrored][x_usize] }
-            PieceType::Cannon =>
-                if color == Color::Red { PST_CANNON_RED[y_usize][x_usize] } else { PST_CANNON_RED[y_mirrored][x_usize] }
-            PieceType::Pawn =>
-                if color == Color::Red { PST_PAWN_RED[y_usize][x_usize] } else { PST_PAWN_RED[y_mirrored][x_usize] }
-        };
+        for (dx, dy, bx, by) in deltas {
+            let tar = Coord::new(pos.x + dx, pos.y + dy);
+            let block = Coord::new(pos.x + bx, pos.y + by);
 
-        val * color.sign()
+            if tar.is_valid() && board.get(block).is_none() {
+                mobility += 1;
+                if let Some(p) = board.get(tar) {
+                    if p.color != color {
+                        mobility += 5;
+                    }
+                }
+            }
+        }
+        mobility
     }
 
-    fn king_safety(board: &Board, color: Color) -> i32 {
+    fn cannon_support(board: &Board, pos: Coord, color: Color) -> i32 {
+        let dirs = [(0,1), (0,-1), (1,0), (-1,0)];
+        let mut support = 0;
+
+        for (dx, dy) in dirs {
+            let mut x = pos.x + dx;
+            let mut y = pos.y + dy;
+            let mut platform_found = false;
+
+            while x >= 0 && x < 9 && y >= 0 && y < 10 {
+                let tar = Coord::new(x, y);
+                if board.get(tar).is_some() {
+                    if !platform_found {
+                        platform_found = true;
+                    } else {
+                        if board.get(tar).unwrap().color != color {
+                            support += 10;
+                        }
+                        break;
+                    }
+                }
+                x += dx;
+                y += dy;
+            }
+        }
+        support
+    }
+
+    fn king_safety(board: &Board, color: Color, phase: f32) -> Option<i32> {
         let (rk, bk) = board.find_kings();
         let king_pos = match color {
-            Color::Red => match rk {
-                Some(pos) => pos,
-                None => return 0, // 修复：如果找不到将/帅，直接返回
-            },
-            Color::Black => match bk {
-                Some(pos) => pos,
-                None => return 0, // 修复：如果找不到将/帅，直接返回
-            },
+            Color::Red => rk?,
+            Color::Black => bk?,
         };
         let opponent = color.opponent();
-        let mut safety: i32 = 0;
+        let mut safety = 0;
 
-        let palace_deltas = [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)];
+        let palace_deltas = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)];
         for (dx, dy) in palace_deltas {
             let pos = Coord::new(king_pos.x + dx, king_pos.y + dy);
             if pos.is_valid() && pos.in_palace(color) {
                 if let Some(p) = board.get(pos) {
                     if p.color == color {
-                        safety += 15;
+                        safety += match p.piece_type {
+                            PieceType::Advisor => 25,
+                            PieceType::Elephant => 15,
+                            _ => 5,
+                        };
                     }
                 }
             }
         }
 
+        let mg_factor = phase;
         for y in 0..10 {
             for x in 0..9 {
                 let pos = Coord::new(x as i8, y as i8);
                 if let Some(p) = board.get(pos) {
                     if p.color == opponent {
                         let dist = (pos.x - king_pos.x).abs() + (pos.y - king_pos.y).abs();
-                        match p.piece_type {
-                            PieceType::Chariot => safety -= (12 - dist).max(0) as i32 * 8,
-                            PieceType::Cannon => safety -= (10 - dist).max(0) as i32 * 5,
-                            PieceType::Horse => safety -= (8 - dist).max(0) as i32 * 6,
-                            _ => {}
-                        }
+                        let threat = match p.piece_type {
+                            PieceType::Chariot => (14 - dist).max(0) as i32 * 10,
+                            PieceType::Cannon => (12 - dist).max(0) as i32 * 7,
+                            PieceType::Horse => (10 - dist).max(0) as i32 * 8,
+                            PieceType::Pawn if dist <= 2 => 20,
+                            _ => 0,
+                        };
+                        safety -= (threat as f32 * mg_factor) as i32;
                     }
                 }
             }
         }
 
-        safety * color.sign()
+        Some(safety * color.sign())
     }
 
-    fn center_control(board: &Board) -> i32 {
-        let mut control = 0;
-        let center_squares = [
-            Coord::new(3,4), Coord::new(4,4), Coord::new(5,4),
-            Coord::new(3,5), Coord::new(4,5), Coord::new(5,5),
-            Coord::new(4,3), Coord::new(4,6),
-        ];
+    fn chariot_mobility(board: &Board, pos: Coord, color: Color) -> i32 {
+        let dirs = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+        let mut score = 0;
 
-        for &pos in &center_squares {
-            if let Some(p) = board.get(pos) {
-                control += if p.color == Color::Red { 25 } else { -25 };
+        for (dx, dy) in dirs {
+            let mut x = pos.x + dx;
+            let mut y = pos.y + dy;
+
+            while x >= 0 && x < 9 && y >= 0 && y < 10 {
+                let tar = Coord::new(x, y);
+                if board.get(tar).is_some() {
+                    if board.get(tar).unwrap().color != color {
+                        score += 5;
+                    }
+                    break;
+                }
+                score += 10;
+                x += dx;
+                y += dy;
             }
         }
-        control
+        score
+    }
+
+    fn pawn_structure(board: &Board, color: Color, phase: f32) -> i32 {
+        let mut score = 0;
+        let eg_factor = 1.0 - phase;
+
+        for y in 0..10 {
+            for x in 0..9 {
+                let pos = Coord::new(x as i8, y as i8);
+                if let Some(p) = board.get(pos) {
+                    if p.color == color && p.piece_type == PieceType::Pawn {
+                        let left = Coord::new(pos.x - 1, pos.y);
+                        let right = Coord::new(pos.x + 1, pos.y);
+                        let mut linked = 0;
+                        if let Some(lp) = board.get(left) {
+                            if lp.color == color && lp.piece_type == PieceType::Pawn {
+                                linked += 1;
+                            }
+                        }
+                        if let Some(rp) = board.get(right) {
+                            if rp.color == color && rp.piece_type == PieceType::Pawn {
+                                linked += 1;
+                            }
+                        }
+                        score += linked * (20.0 + 30.0 * eg_factor) as i32;
+
+                        if eg_factor > 0.5 && pos.crosses_river(color) {
+                            let (rk, bk) = board.find_kings();
+                            let enemy_king = if color == Color::Red { bk } else { rk };
+                            if let Some(ek) = enemy_king {
+                                let dist = (pos.x - ek.x).abs() + (pos.y - ek.y).abs();
+                                if dist <= 2 {
+                                    score += (3 - dist) as i32 * 50;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        score * color.sign()
+    }
+
+    fn elephant_structure(board: &Board, color: Color, phase: f32) -> i32 {
+        let mut score = 0;
+        let mut elephants = Vec::new();
+
+        for y in 0..10 {
+            for x in 0..9 {
+                let pos = Coord::new(x as i8, y as i8);
+                if let Some(p) = board.get(pos) {
+                    if p.color == color && p.piece_type == PieceType::Elephant {
+                        elephants.push(pos);
+                    }
+                }
+            }
+        }
+
+        let count = elephants.len();
+        let mg_factor = phase;
+        let eg_factor = 1.0 - phase;
+
+        match count {
+            0 => {
+                score -= (150.0 * mg_factor + 100.0 * eg_factor) as i32;
+            }
+            1 => {
+                score -= (80.0 * mg_factor + 50.0 * eg_factor) as i32;
+                if let Some(pos) = elephants.first() {
+                    let moves = movegen::generate_elephant_moves(board, *pos, color);
+                    let mut protected = false;
+                    for m in moves {
+                        if let Some(p) = board.get(m) {
+                            if p.color == color && (p.piece_type == PieceType::Advisor || p.piece_type == PieceType::Pawn) {
+                                protected = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !protected {
+                        score -= 30;
+                    }
+                }
+            }
+            2 => {
+                let pos1 = elephants[0];
+                let pos2 = elephants[1];
+                let moves1 = movegen::generate_elephant_moves(board, pos1, color);
+                let moves2 = movegen::generate_elephant_moves(board, pos2, color);
+
+                let mut linked = false;
+                for m1 in &moves1 {
+                    if moves2.contains(m1) {
+                        linked = true;
+                        break;
+                    }
+                }
+
+                if linked {
+                    score += (60.0 * mg_factor + 40.0 * eg_factor) as i32;
+                }
+            }
+            _ => {}
+        }
+
+        score * color.sign()
     }
 
     pub fn evaluate(board: &Board, side: Color) -> i32 {
-        // 如果一方已经没有将/帅了，直接返回胜负值
+        if let Some(score) = EndgameTablebase::probe(board, side) {
+            return score;
+        }
+
         let (rk, bk) = board.find_kings();
         if rk.is_none() {
             return if side == Color::Red { -100000 } else { 100000 };
@@ -1192,35 +1992,67 @@ pub mod eval {
             return if side == Color::Red { 100000 } else { -100000 };
         }
 
-        let phase = game_phase(board).clamp(0.0, 1.0);
+        let phase = game_phase(board);
         let mut score = 0;
 
         for y in 0..10 {
             for x in 0..9 {
                 if let Some(piece) = board.cells[y][x] {
-                    let base_mid = BASE_VALUE_MIDGAME[piece.piece_type as usize];
-                    let base_end = BASE_VALUE_ENDGAME[piece.piece_type as usize];
-                    let base = (base_mid as f32 * phase + base_end as f32 * (1.0 - phase)) as i32;
-                    let pos = position_value(piece.piece_type, piece.color, x as i8, y as i8);
+                    let x_usize = x as usize;
+                    let y_usize = y as usize;
+                    let sign = if piece.color == Color::Red { 1 } else { -1 };
+                    let pos = Coord::new(x as i8, y as i8);
 
-                    if piece.color == Color::Red {
-                        score += base + pos;
-                    } else {
-                        score -= base + pos;
+                    let mg_v = MG_VALUE[piece.piece_type as usize];
+                    let eg_v = EG_VALUE[piece.piece_type as usize];
+                    let val = (mg_v as f32 * phase + eg_v as f32 * (1.0 - phase)) as i32;
+                    score += val * sign;
+
+                    let pst = pst_val(piece.piece_type, piece.color, x_usize, y_usize, phase);
+                    score += pst;
+
+                    match piece.piece_type {
+                        PieceType::Horse => {
+                            let mob = horse_mobility(board, pos, piece.color);
+                            score += mob * sign * 5;
+                        }
+                        PieceType::Chariot => {
+                            let mob = chariot_mobility(board, pos, piece.color);
+                            score += mob * sign;
+                        }
+                        PieceType::Cannon => {
+                            let sup = cannon_support(board, pos, piece.color);
+                            score += sup * sign;
+                        }
+                        _ => {}
                     }
                 }
             }
         }
 
-        score += king_safety(board, Color::Red);
-        score -= king_safety(board, Color::Black);
-        score += center_control(board);
+        if let Some(ks_red) = king_safety(board, Color::Red, phase) {
+            score += ks_red;
+        }
+        if let Some(ks_black) = king_safety(board, Color::Black, phase) {
+            score -= ks_black;
+        }
+
+        score += pawn_structure(board, Color::Red, phase);
+        score -= pawn_structure(board, Color::Black, phase);
+
+        score += center_control(board, Color::Red, phase);
+        score -= center_control(board, Color::Black, phase);
+        score += piece_coordination(board, Color::Red, phase);
+        score -= piece_coordination(board, Color::Black, phase);
+
+        score += elephant_structure(board, Color::Red, phase);
+        score -= elephant_structure(board, Color::Black, phase);
 
         if board.is_check(Color::Black) {
-            score += 150;
+            score += 50;
         }
         if board.is_check(Color::Red) {
-            score -= 150;
+            score -= 50;
         }
 
         if side == Color::Red { score } else { -score }
@@ -1231,10 +2063,7 @@ pub mod search {
     use super::*;
     use eval::evaluate;
     use movegen::*;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::sync::{Arc, RwLock};
-    use std::time::{Duration, Instant};
-    use std::thread;
+    use super::book::OpeningBook;
 
     #[derive(Clone)]
     pub struct SharedTT {
@@ -1843,6 +2672,17 @@ pub mod search {
     }
 
     pub fn find_best_move(board: &mut Board, _max_depth: u8, side: Color) -> Option<Action> {
+        if board.move_history.len() < 15 {
+            static BOOK: OnceLock<OpeningBook> = OnceLock::new();
+            let book = BOOK.get_or_init(OpeningBook::new);
+            if let Some(action) = book.probe(board) {
+                let legal_moves = generate_legal_moves(board, side);
+                if legal_moves.contains(&action) {
+                    return Some(action);
+                }
+            }
+        }
+
         let legal_moves = generate_legal_moves(board, side);
         if legal_moves.is_empty() {
             return None;
