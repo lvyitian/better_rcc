@@ -1,36 +1,121 @@
+//! 中国象棋引擎 (Chinese Chess Engine)
+//!
+//! A competitive Chinese Chess (Xiangqi) engine with:
+//! - Alpha-beta search with MTDF (Memory-enhanced Test Driver)
+//! - Quiescence search with SEE (Static Exchange Evaluation)
+//! - Transposition tables with Zobrist hashing
+//! - Move ordering with killers, counter moves, and history heuristics
+//! - Opening book for common patterns
+//! - Endgame tablebase for simplified positions
+
 use std::fmt;
 use std::io;
 use std::io::Write;
 use std::sync::OnceLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use std::thread;
 
+// =============================================================================
+// BOARD CONSTANTS
+// =============================================================================
+
+/// Board dimensions: 9 columns (x: 0-8) and 10 rows (y: 0-9)
+/// Red side is at y=7-9, Black side at y=0-2, River at y=4-5
 pub const BOARD_WIDTH: i8 = 9;
 pub const BOARD_HEIGHT: i8 = 10;
+
+// =============================================================================
+// SEARCH CONSTANTS
+// =============================================================================
+
+/// Maximum search depth for main search (14 plies ≈ ~7 moves ahead)
 pub const MAX_DEPTH: u8 = 14;
+
+/// Maximum depth for quiescence search (captures/checks only)
 pub const QS_MAX_DEPTH: u8 = 8;
+
+/// Maximum single-check extension (to prevent horizon effect with checks)
 pub const MAX_CHECK_EXTENSION: u8 = 2;
+
+/// Maximum total extensions per search path (prevents excessive extensions)
 pub const MAX_TOTAL_EXTENSION: u8 = 3;
+
+/// Transposition table size: 2^25 ≈ 33 million entries
+/// Each entry is ~16 bytes, so ~500MB total
 pub const TT_SIZE: usize = 1 << 25;
-pub const ENDGAME_THRESHOLD: i32 = 8000; 
-pub const MIDGAME_THRESHOLD: i32 = 4000;
+
+/// When material is below this, position is considered "endgame"
+/// At full material: ~6600 (King=10000, Chariot=650, Horse/Cannon=350, etc.)
+/// Endgame begins when ~2500 material remains (~4 chariots per side)
+pub const ENDGAME_THRESHOLD: i32 = 2500;
+
+/// Threshold for midgame evaluation (not currently used for phase calculation)
+/// Higher than ENDGAME_THRESHOLD to define the transition phase
+pub const MIDGAME_THRESHOLD: i32 = 5000;
+
+/// Number of repeated positions before declaring a repetition violation
 pub const REPETITION_VIOLATION_COUNT: u8 = 3;
-pub const SEARCH_TIMEOUT_MS: u64 = 21000; 
+
+/// Search time limit per move in milliseconds
+pub const SEARCH_TIMEOUT_MS: u64 = 21000;
+
+/// Safety buffer to ensure search stops before actual time limit
 pub const TIME_BUFFER_MS: u64 = 1000;
+
+/// Null move pruning depth reduction (R in literature)
 pub const NULL_MOVE_REDUCTION: u8 = 2;
+
+/// Minimum moves before applying Late Move Reductions (LMR)
 pub const LMR_MIN_MOVES: usize = 4;
+
+/// Number of parallel search threads (iterative deepening)
 pub const SEARCH_THREADS: usize = 4;
+
+// =============================================================================
+// PRUNING CONSTANTS
+// =============================================================================
+
+/// Futility margin: estimated error per depth level
+/// If static_eval + margin <= alpha, prune the move
+/// At depth 3: margin = 600, which is ~1 chariot value
 pub const FUTILITY_MARGIN: i32 = 200;
+
+/// SEE threshold for quiescence search captures
+/// Only captures with SEE >= -50 are searched
+/// Negative values indicate losing captures, but small losses are still searched
 pub const SEE_MARGIN: i32 = -50;
+
+/// Aspiration window width for MTDF search
+/// Initial window is guess ± 50 centipawns
 pub const ASPIRATION_WINDOW: i32 = 50;
 
+// =============================================================================
+// EVALUATION CONSTANTS
+// =============================================================================
+
+/// Mate score: returned when checkmate is detected
+/// This is large enough to dominate all other evaluations
+pub const MATE_SCORE: i32 = 100000;
+
+/// Bonus added to evaluation when a side is in check
+/// Encourages the engine to seek checks in the search
+pub const CHECK_BONUS: i32 = 50;
+
+// =============================================================================
+// RULE SETS
+// =============================================================================
+
+/// Chinese Chess rule variants affecting repetition and illegal move detection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleSet {
+    /// Official competition rules: long-check and long-capture threats both illegal
     Official,
+    /// Relaxed rules: only long-check is illegal, long-capture threats allowed
     OnlyLongCheckIllegal,
+    /// Casual rules: no repetition restrictions, only checkmate/stalemate decide
     NoRestriction,
 }
 
@@ -43,20 +128,16 @@ impl RuleSet {
         }
     }
 
+    /// Returns true if perpetual check (same checking position 3+ times) is illegal
     #[inline(always)]
     pub fn is_long_check_banned(&self) -> bool {
-        match self {
-            RuleSet::Official | RuleSet::OnlyLongCheckIllegal => true,
-            RuleSet::NoRestriction => false,
-        }
+        matches!(self, RuleSet::Official | RuleSet::OnlyLongCheckIllegal)
     }
 
+    /// Returns true if continuous capture threats (long-capture) are illegal
     #[inline(always)]
     pub fn is_long_capture_banned(&self) -> bool {
-        match self {
-            RuleSet::Official => true,
-            RuleSet::OnlyLongCheckIllegal | RuleSet::NoRestriction => false,
-        }
+        matches!(self, RuleSet::Official)
     }
 }
 
@@ -66,18 +147,29 @@ impl fmt::Display for RuleSet {
     }
 }
 
+// =============================================================================
+// PIECE TYPES
+// =============================================================================
+
+/// Piece types ordered by value (for array indexing)
+/// Values: King > Chariot > Cannon ≈ Horse > Advisor ≈ Elephant > Pawn
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 #[repr(u8)]
 pub enum PieceType {
-    King = 0,
-    Advisor = 1,
-    Elephant = 2,
-    Pawn = 3,
-    Horse = 4,
-    Cannon = 5,
-    Chariot = 6,
+    King = 0,    // 将/帥 - must be protected, cannot be captured
+    Advisor = 1, // 士/仕 - defensive piece, palace-bound
+    Elephant = 2, // 象/相 - defensive piece, river-bound
+    Pawn = 3,     // 兵/卒 - advances and can attack sideways after crossing river
+    Horse = 4,   // 馬/馬 - jumping piece, L-shaped movement
+    Cannon = 5,   // 炮/砲 - ranging piece, captures with screen
+    Chariot = 6,  // 車/車 - most valuable offensive piece, rook-like
 }
 
+// =============================================================================
+// COLORS
+// =============================================================================
+
+/// Player colors: Red moves first (traditional) or Black can move first
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Color {
     Red,
@@ -85,6 +177,7 @@ pub enum Color {
 }
 
 impl Color {
+    /// Returns the opposite color
     #[inline(always)]
     pub fn opponent(self) -> Self {
         match self {
@@ -93,6 +186,8 @@ impl Color {
         }
     }
 
+    /// Returns +1 for Red, -1 for Black
+    /// Used to flip scores: positive = Red advantage, negative = Black advantage
     #[inline(always)]
     pub fn sign(self) -> i32 {
         match self {
@@ -108,6 +203,13 @@ pub struct Piece {
     pub piece_type: PieceType,
 }
 
+// =============================================================================
+// COORDINATE SYSTEM
+// =============================================================================
+
+/// Board coordinates: x=0-8 (left to right), y=0-9 (bottom to top)
+/// Red pieces start at y=7-9, Black at y=0-2
+/// River (5th file from each side) spans y=4-5
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Coord {
     pub x: i8,
@@ -120,11 +222,14 @@ impl Coord {
         Coord { x, y }
     }
 
+    /// Returns true if coordinate is within board bounds [0,8] x [0,9]
     #[inline(always)]
     pub fn is_valid(self) -> bool {
         self.x >= 0 && self.x < BOARD_WIDTH && self.y >= 0 && self.y < BOARD_HEIGHT
     }
 
+    /// Palace check: Red palace is y>=7, Black palace is y<=2, x is always 3-5
+    /// The palace is the 3x3 area near each edge where King and Advisors move
     #[inline(always)]
     pub fn in_palace(self, color: Color) -> bool {
         let x_ok = self.x >= 3 && self.x <= 5;
@@ -135,6 +240,10 @@ impl Coord {
         x_ok && y_ok
     }
 
+    /// River crossing check for pawns
+    /// Red pawns have crossed when y <= 4 (advancing toward y=0)
+    /// Black pawns have crossed when y >= 5 (advancing toward y=9)
+    /// After crossing, pawns gain the ability to move sideways
     #[inline(always)]
     pub fn crosses_river(self, color: Color) -> bool {
         match color {
@@ -143,29 +252,47 @@ impl Coord {
         }
     }
 
+    /// Core area: the central region of the board that matters most for evaluation
+    /// x=3-5, y=3-6 (symmetric for both colors)
+    /// This zone represents the river approach and central columns on each side
     #[inline(always)]
     pub fn in_core_area(self, color: Color) -> bool {
         let x_ok = self.x >= 3 && self.x <= 5;
+        // River is at y=4-5, so y=3-6 covers the approach zones symmetrically
+        // y=3 is near the river (Red's side), y=6 is near the palace
         let y_ok = match color {
-            Color::Red => self.y >= 4 && self.y <= 7,
-            Color::Black => self.y >= 2 && self.y <= 5,
+            Color::Red => self.y >= 3 && self.y <= 6,
+            Color::Black => self.y >= 3 && self.y <= 6,
         };
         x_ok && y_ok
     }
 
+    /// Manhattan distance between two coordinates (Chebyshev for piece attacks)
     #[inline(always)]
     pub fn distance_to(self, other: Coord) -> i32 {
         (self.x - other.x).abs() as i32 + (self.y - other.y).abs() as i32
     }
+
+    /// Converts a coordinate to the symmetric position for the opposite color
+    /// Used for Black's piece-square tables (board is vertically mirrored)
+    #[inline(always)]
+    pub fn mirror_vertical(self) -> Self {
+        Coord::new(self.x, 9 - self.y)
+    }
 }
 
+// =============================================================================
+// ACTIONS (MOVES)
+// =============================================================================
+
+/// Represents a chess move with full context for search and evaluation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Action {
-    pub src: Coord,
-    pub tar: Coord,
-    pub captured: Option<Piece>,
-    pub is_check: bool,
-    pub is_capture_threat: bool,
+    pub src: Coord,                  // Source square
+    pub tar: Coord,                  // Target square
+    pub captured: Option<Piece>,      // Piece captured (if any)
+    pub is_check: bool,              // Does this move give check?
+    pub is_capture_threat: bool,     // Does this move threaten capture? (for repetition)
 }
 
 impl Action {
@@ -182,14 +309,26 @@ impl Action {
 
     #[inline(always)]
     pub fn mvv_lva_score(self) -> i32 {
+        // MVV-LVA: Most Valuable Victim - Least Valuable Attacker
+        // Captured piece value × 100, so high-value captures rank first
+        // This encourages capturing the opponent's valuable pieces first
         const PIECE_VALUES: [i32; 7] = [10000, 100, 100, 50, 300, 300, 500];
         self.captured.map_or(0, |p| PIECE_VALUES[p.piece_type as usize]) * 100
     }
 }
 
+// =============================================================================
+// ZOBRIST HASHING
+// =============================================================================
+
+/// Zobrist hashing for fast position identification and transposition tables
+/// Each piece at each position has a unique random 64-bit number
+/// Position hash = XOR of all piece hashes + side-to-move hash
 #[derive(Debug, Clone, Copy)]
 pub struct Zobrist {
+    /// piece[pos][color][piece_type] -> random 64-bit hash
     pub pieces: [[[u64; 7]; 2]; 90],
+    /// Hash for which side is to move (XORed when sides switch)
     pub side: u64,
 }
 
@@ -214,10 +353,10 @@ impl Zobrist {
 
         let mut rng = Xorshift64::new(0x123456789abcdef);
         let mut pieces = [[[0; 7]; 2]; 90];
-        for pos in 0..90 {
-            for color in 0..2 {
-                for pt in 0..7 {
-                    pieces[pos][color][pt] = rng.next();
+        for pos in &mut pieces {
+            for color in pos {
+                for pt in color {
+                    *pt = rng.next();
                 }
             }
         }
@@ -246,13 +385,19 @@ pub enum TTEntryType {
     Upper,
 }
 
+// =============================================================================
+// TRANSPOSITION TABLE
+// =============================================================================
+
+/// Transposition table entry storing searched position information
+/// Allows the engine to reuse previous search results
 #[derive(Debug, Clone, Copy)]
 pub struct TTEntry {
-    pub key: u64,
-    pub depth: u8,
-    pub value: i32,
-    pub entry_type: TTEntryType,
-    pub best_move: Option<Action>,
+    pub key: u64,           // Position hash (Zobrist key)
+    pub depth: u8,          // Search depth this entry represents
+    pub value: i32,         // Evaluated score
+    pub entry_type: TTEntryType,  // Exact, Lower bound, or Upper bound
+    pub best_move: Option<Action>, // Best move from this position
 }
 
 impl Default for TTEntry {
@@ -267,8 +412,15 @@ impl Default for TTEntry {
     }
 }
 
+/// Transposition table using a fixed-size array with simple replacement strategy
 pub struct TranspositionTable {
     table: Vec<TTEntry>,
+}
+
+impl Default for TranspositionTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TranspositionTable {
@@ -278,15 +430,19 @@ impl TranspositionTable {
         }
     }
 
+    /// Hash index using bitmask (size must be power of 2)
     #[inline(always)]
     pub fn index(&self, key: u64) -> usize {
         (key as usize) & (TT_SIZE - 1)
     }
 
+    /// Store a position in the transposition table
+    /// Only replaces if: entry is empty, new depth is greater, or same position
     pub fn store(&mut self, key: u64, depth: u8, value: i32, entry_type: TTEntryType, best_move: Option<Action>) {
         let idx = self.index(key);
         let entry = &mut self.table[idx];
-        if entry.key == 0 || depth >= entry.depth || entry.key != key {
+        // Replace if: empty slot, deeper search, or same position (key match)
+        if entry.key == 0 || depth > entry.depth || entry.key != key {
             entry.key = key;
             entry.depth = depth;
             entry.value = value;
@@ -295,6 +451,7 @@ impl TranspositionTable {
         }
     }
 
+    /// Look up a position in the table
     pub fn probe(&self, key: u64) -> Option<&TTEntry> {
         let idx = self.index(key);
         let entry = &self.table[idx];
@@ -306,23 +463,41 @@ impl TranspositionTable {
     }
 }
 
+// =============================================================================
+// OPENING BOOK
+// =============================================================================
+
+/// Opening book storing common Xiangqi openings with move weights
+/// Positions are keyed by Zobrist hash, moves have associated weights
 pub mod book {
     use super::*;
     use std::collections::HashMap;
 
+    /// Opening book entry: position hash -> single preferred move
+    /// Using a simpler map since most positions have only one move
     pub struct OpeningBook {
-        book: HashMap<u64, Vec<(Action, i32)>>,
+        book: HashMap<u64, Action>,
+        /// For positions with multiple moves, store alternatives keyed by hash
+        alternatives: HashMap<u64, Vec<Action>>,
+    }
+
+    impl Default for OpeningBook {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl OpeningBook {
         pub fn new() -> Self {
             let mut book = OpeningBook {
                 book: HashMap::new(),
+                alternatives: HashMap::new(),
             };
             book.init_all_openings();
             book
         }
 
+        /// Initialize all opening lines
         fn init_all_openings(&mut self) {
             self.init_dang_tou_pao();
             self.init_shun_pao();
@@ -333,42 +508,60 @@ pub mod book {
             self.init_xian_ren_zhi_lu();
         }
 
+        /// Insert a position with one or more move options (first is primary)
+        #[inline(always)]
+        fn insert(&mut self, key: u64, actions: &[Action]) {
+            if actions.is_empty() {
+                return;
+            }
+            if actions.len() == 1 {
+                self.book.insert(key, actions[0]);
+                return;
+            }
+            // First action is primary, rest are alternatives
+            self.book.insert(key, actions[0]);
+            if actions.len() > 1 {
+                self.alternatives.insert(key, actions[1..].to_vec());
+            }
+        }
+
+        /// 炮二平五 (Cannon 2 flat 5) - Central Cannon opening
         fn init_dang_tou_pao(&mut self) {
             let mut board = Board::new(RuleSet::Official, 1);
             let key = board.zobrist_key;
             // 红方炮二平五 (7,7)->(4,7)
             let a1 = Action::new(Coord::new(7, 7), Coord::new(4, 7), None);
-            self.book.insert(key, vec![(a1, 1000)]);
+            self.book.insert(key, a1);
 
             board.make_move(a1);
             let key = board.zobrist_key;
             // 黑方马8进7 (7,0)->(6,2)
             let a2 = Action::new(Coord::new(7, 0), Coord::new(6, 2), None);
-            self.book.insert(key, vec![(a2, 1000)]);
+            self.book.insert(key, a2);
 
             board.make_move(a2);
             let key = board.zobrist_key;
             // 红方马八进七 (1,9)->(2,7)
             let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-            self.book.insert(key, vec![(a3, 1000)]);
+            self.book.insert(key, a3);
 
             board.make_move(a3);
             // 黑方马2进3 (1,0)->(2,2)
             let a4 = Action::new(Coord::new(1, 0), Coord::new(2, 2), None);
-            self.book.insert(board.zobrist_key, vec![(a4, 1000)]);
+            self.insert(board.zobrist_key, &[a4]);
 
             board.make_move(a4);
             // 红方车九平八 (0,9)->(0,8)
             let a5_main = Action::new(Coord::new(0, 9), Coord::new(0, 8), None);
             // 红方兵五进一 (4,6)->(4,5)
             let a5_wuqi = Action::new(Coord::new(4, 6), Coord::new(4, 5), None);
-            self.book.insert(board.zobrist_key, vec![(a5_main, 800), (a5_wuqi, 200)]);
+            self.insert(board.zobrist_key, &[a5_main, a5_wuqi]);
 
             let mut board_main = board.clone();
             board_main.make_move(a5_main);
             // 黑方车1平2 (8,0)->(8,1)
             let a6 = Action::new(Coord::new(8, 0), Coord::new(8, 1), None);
-            self.book.insert(board_main.zobrist_key, vec![(a6, 1000)]);
+            self.book.insert(board_main.zobrist_key, a6);
         }
 
         fn init_shun_pao(&mut self) {
@@ -376,48 +569,44 @@ pub mod book {
             let key = board.zobrist_key;
             // 红方炮二平五 (7,7)->(4,7)
             let a1 = Action::new(Coord::new(7, 7), Coord::new(4, 7), None);
-            if !self.book.contains_key(&key) {
-                self.book.insert(key, vec![(a1, 500)]);
-            }
+            // Use insert to handle positions that may already exist
+            self.insert(key, &[a1]);
 
             board.make_move(a1);
             let key = board.zobrist_key;
             // 黑方炮8平5 (7,0)->(4,0)
             let a2 = Action::new(Coord::new(7, 0), Coord::new(4, 0), None);
-            self.book.insert(key, vec![(a2, 600)]);
+            self.book.insert(key, a2);
 
             board.make_move(a2);
             let key = board.zobrist_key;
             // 红方马八进七 (1,9)->(2,7)
             let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-            self.book.insert(key, vec![(a3, 1000)]);
+            self.book.insert(key, a3);
 
             board.make_move(a3);
             let key = board.zobrist_key;
             // 黑方车1进1 (8,0)->(8,1)
             let a4 = Action::new(Coord::new(8, 0), Coord::new(8, 1), None);
-            self.book.insert(key, vec![(a4, 1000)]);
+            self.book.insert(key, a4);
 
             board.make_move(a4);
             let key = board.zobrist_key;
             // 红方车九平八 (0,9)->(0,8)
             let a5 = Action::new(Coord::new(0, 9), Coord::new(0, 8), None);
-            self.book.insert(key, vec![(a5, 1000)]);
+            self.book.insert(key, a5);
         }
 
         fn init_lie_pao(&mut self) {
             let mut board = Board::new(RuleSet::Official, 1);
-            let _key = board.zobrist_key;
             // 红方炮二平五 (7,7)->(4,7)
             let a1 = Action::new(Coord::new(7, 7), Coord::new(4, 7), None);
 
             board.make_move(a1);
-            let _key = board.zobrist_key;
             // 黑方马8进7 (7,0)->(6,2)
             let a2 = Action::new(Coord::new(7, 0), Coord::new(6, 2), None);
 
             board.make_move(a2);
-            let _key = board.zobrist_key;
             // 红方马八进七 (1,9)->(2,7)
             let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
 
@@ -427,7 +616,7 @@ pub mod book {
             let a4_lie = Action::new(Coord::new(1, 0), Coord::new(4, 0), None);
             // 黑方马2进3 (1,0)->(2,2)
             let a4_normal = Action::new(Coord::new(1, 0), Coord::new(2, 2), None);
-            self.book.insert(key, vec![(a4_normal, 700), (a4_lie, 300)]);
+            self.insert(key, &[a4_normal, a4_lie]);
         }
 
         fn init_fei_xiang(&mut self) {
@@ -435,24 +624,19 @@ pub mod book {
             let key = board.zobrist_key;
             // 红方相三进五 (6,9)->(4,7)
             let a1 = Action::new(Coord::new(6, 9), Coord::new(4, 7), None);
-            if let Some(mut existing) = self.book.remove(&key) {
-                existing.push((a1, 400));
-                self.book.insert(key, existing);
-            } else {
-                self.book.insert(key, vec![(a1, 400)]);
-            }
+            self.insert(key, &[a1]);
 
             board.make_move(a1);
             let key = board.zobrist_key;
             // 黑方炮8平5 (7,0)->(4,0)
             let a2 = Action::new(Coord::new(7, 0), Coord::new(4, 0), None);
-            self.book.insert(key, vec![(a2, 600)]);
+            self.book.insert(key, a2);
 
             board.make_move(a2);
             let key = board.zobrist_key;
             // 红方马八进七 (1,9)->(2,7)
             let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-            self.book.insert(key, vec![(a3, 1000)]);
+            self.book.insert(key, a3);
         }
 
         fn init_qi_ma(&mut self) {
@@ -460,23 +644,19 @@ pub mod book {
             let key = board.zobrist_key;
             // 红方马八进七 (1,9)->(2,7)
             let a1 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-            if let Some(existing) = self.book.get_mut(&key) {
-                existing.push((a1, 300));
-            } else {
-                self.book.insert(key, vec![(a1, 300)]);
-            }
+            self.insert(key, &[a1]);
 
             board.make_move(a1);
             let key = board.zobrist_key;
             // 黑方卒7进1 (6,3)->(6,4)
             let a2 = Action::new(Coord::new(6, 3), Coord::new(6, 4), None);
-            self.book.insert(key, vec![(a2, 1000)]);
+            self.book.insert(key, a2);
 
             board.make_move(a2);
             let key = board.zobrist_key;
             // 修正：红方兵三进一 (6,6)->(6,5)
             let a3 = Action::new(Coord::new(6, 6), Coord::new(6, 5), None);
-            self.book.insert(key, vec![(a3, 1000)]);
+            self.book.insert(key, a3);
         }
 
         fn init_guo_gong_pao(&mut self) {
@@ -484,23 +664,19 @@ pub mod book {
             let key = board.zobrist_key;
             // 红方炮八平七 (1,7)->(3,7)
             let a1 = Action::new(Coord::new(1, 7), Coord::new(3, 7), None);
-            if let Some(existing) = self.book.get_mut(&key) {
-                existing.push((a1, 200));
-            } else {
-                self.book.insert(key, vec![(a1, 200)]);
-            }
+            self.insert(key, &[a1]);
 
             board.make_move(a1);
             let key = board.zobrist_key;
             // 黑方马8进7 (7,0)->(6,2)
             let a2 = Action::new(Coord::new(7, 0), Coord::new(6, 2), None);
-            self.book.insert(key, vec![(a2, 1000)]);
+            self.book.insert(key, a2);
 
             board.make_move(a2);
             let key = board.zobrist_key;
             // 红方马八进七 (1,9)->(2,7)
             let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-            self.book.insert(key, vec![(a3, 1000)]);
+            self.book.insert(key, a3);
         }
 
         fn init_xian_ren_zhi_lu(&mut self) {
@@ -508,49 +684,77 @@ pub mod book {
             let key = board.zobrist_key;
             // 修正：红方兵三进一 (6,6)->(6,5)
             let a1 = Action::new(Coord::new(6, 6), Coord::new(6, 5), None);
-            if let Some(existing) = self.book.get_mut(&key) {
-                existing.iter_mut().for_each(|(_, w)| *w = *w * 2 / 3);
-                existing.push((a1, 1000));
-            } else {
-                self.book.insert(key, vec![(a1, 1000)]);
-            }
+            self.insert(key, &[a1]);
 
             board.make_move(a1);
             let key = board.zobrist_key;
             // 黑方卒7进1 (6,3)->(6,4)
             let a2 = Action::new(Coord::new(6, 3), Coord::new(6, 4), None);
-            self.book.insert(key, vec![(a2, 700)]);
+            self.book.insert(key, a2);
 
             board.make_move(a2);
             let key = board.zobrist_key;
             // 红方炮八平五 (1,7)->(4,7)
             let a3 = Action::new(Coord::new(1, 7), Coord::new(4, 7), None);
-            self.book.insert(key, vec![(a3, 1000)]);
+            self.book.insert(key, a3);
         }
 
+        /// Look up the best move for the current position
+        /// Returns None if position is not in book
         pub fn probe(&self, board: &Board) -> Option<Action> {
-            if let Some(moves) = self.book.get(&board.zobrist_key) {
-                if moves.is_empty() {
-                    return None;
-                }
+            let key = board.zobrist_key;
+            let primary = *self.book.get(&key)?;
 
-                let max_weight = moves.iter().map(|(_, w)| *w).max().unwrap_or(0);
-                let candidates: Vec<&(Action, i32)> = moves.iter().filter(|(_, w)| *w == max_weight).collect();
+            // Check if primary move is still legal (source has our piece, target is empty or has enemy)
+            let primary_legal = board.get(primary.src).is_some()
+                && (board.get(primary.tar).is_none()
+                    || board.get(primary.tar).is_some_and(|p| p.color != board.current_side));
 
-                if candidates.is_empty() {
-                    return None;
-                }
+            // Gather all valid moves (primary + alternatives)
+            let mut candidates: Vec<Action> = Vec::new();
+            candidates.push(primary);
 
-                if candidates.len() == 1 {
-                    return Some(candidates[0].0);
-                }
-
-                let seed = (board.zobrist_key & 0xFFFF) as usize + (board.move_history.len() % 2) * 0x8000;
-                let idx = seed % candidates.len();
-                Some(candidates[idx].0)
-            } else {
-                None
+            if let Some(alts) = self.alternatives.get(&key) {
+                candidates.extend(alts.iter().copied());
             }
+
+            // Filter to only legal moves
+            let valid_moves: Vec<Action> = candidates.into_iter()
+                .filter(|a| {
+                    board.get(a.src).is_some()
+                        && (board.get(a.tar).is_none()
+                            || board.get(a.tar).is_some_and(|p| p.color != board.current_side))
+                })
+                .collect();
+
+            if valid_moves.is_empty() {
+                return None;
+            }
+
+            // If primary is legal and we have alternatives, prefer primary more often
+            if primary_legal {
+                if let Some(alts) = self.alternatives.get(&key)
+                    && !alts.is_empty() {
+                    // 70% chance to pick primary, 30% for alternatives
+                    let seed = (key & 0xFFFF) as usize + (board.move_history.len() % 2) * 0x8000;
+                    if seed % 10 < 7 {
+                        return Some(primary);
+                    }
+                    let idx = seed % alts.len();
+                    return Some(alts[idx]);
+                }
+                return Some(primary);
+            }
+
+            // Primary not legal, pick from alternatives
+            if let Some(alts) = self.alternatives.get(&key)
+                && !alts.is_empty() {
+                let seed = (key & 0xFFFF) as usize + (board.move_history.len() % 2) * 0x8000;
+                let idx = seed % alts.len();
+                return Some(alts[idx]);
+            }
+
+            None
         }
     }
 
@@ -564,7 +768,7 @@ pub mod book {
                 && red_other == 2
                 && black[PieceType::King as usize] == 1
                 && black[PieceType::Chariot as usize] == 1
-                && black_other >= 1 && black_other <= 4
+                && (1..=4).contains(&black_other)
             {
                 let score = 85000;
                 return Some(if side == Color::Red { score } else { -score });
@@ -597,24 +801,24 @@ pub mod book {
                 && black[PieceType::Advisor as usize] == 1
                 && black_other == 1
             {
-                let mut pawn_pos = None;
-                for y in 0..10 {
-                    for x in 0..9 {
-                        if let Some(p) = board.cells[y][x] {
-                            if p.color == Color::Red && p.piece_type == PieceType::Pawn {
-                                pawn_pos = Some(Coord::new(x as i8, y as i8));
-                                break;
+                // Find pawn position - scan efficiently
+                let pawn_pos = board.cells.iter()
+                    .enumerate()
+                    .find_map(|(y, row)| {
+                        row.iter().enumerate().find_map(|(x, &p)| {
+                            if p == Some(Piece { color: Color::Red, piece_type: PieceType::Pawn }) {
+                                Some(Coord::new(x as i8, y as i8))
+                            } else {
+                                None
                             }
-                        }
-                    }
-                }
+                        })
+                    });
 
-                if let Some(pos) = pawn_pos {
-                    if pos.crosses_river(Color::Red) {
+                if let Some(pos) = pawn_pos
+                    && pos.crosses_river(Color::Red) {
                         let score = 80000;
                         return Some(if side == Color::Red { score } else { -score });
                     }
-                }
             }
             None
         }
@@ -672,36 +876,23 @@ pub mod book {
                 && red[PieceType::Chariot as usize] == 1
                 && red_other == 1
                 && black[PieceType::King as usize] == 1
-            {
-                if (black[PieceType::Horse as usize] == 1 && black_other == 1)
-                    || (black[PieceType::Cannon as usize] == 1 && black_other == 1)
-                    || (black[PieceType::Advisor as usize] == 2 && black_other == 2)
-                    || (black[PieceType::Elephant as usize] == 2 && black_other == 2)
+                && (black_other == 1 && (black[PieceType::Horse as usize] == 1 || black[PieceType::Cannon as usize] == 1)
+                    || black_other == 2 && (black[PieceType::Advisor as usize] == 2 || black[PieceType::Elephant as usize] == 2))
                 {
                     let score = 75000;
                     return Some(if side == Color::Red { score } else { -score });
                 }
-            }
             None
         }
 
         pub fn probe(board: &Board, side: Color) -> Option<i32> {
-            let mut red = [0; 7];
-            let mut black = [0; 7];
-            for y in 0..10 {
-                for x in 0..9 {
-                    if let Some(p) = board.cells[y][x] {
-                        match p.color {
-                            Color::Red => red[p.piece_type as usize] += 1,
-                            Color::Black => black[p.piece_type as usize] += 1,
-                        }
-                    }
-                }
-            }
+            // Count pieces per side using iterator pattern
+            let (red, black) = board.piece_counts();
 
-            let red_other = red.iter().skip(1).sum::<i32>();
-            let black_other = black.iter().skip(1).sum::<i32>();
+            let red_other = red[1..].iter().sum::<i32>();
+            let black_other = black[1..].iter().sum::<i32>();
 
+            // Check each known endgame pattern in priority order
             if let Some(score) = Self::check_double_chariot_vs_single(&red, &black, red_other, black_other, side) {
                 return Some(score);
             }
@@ -729,9 +920,17 @@ pub mod book {
     }
 }
 
+// =============================================================================
+// MOVE GENERATION
+// =============================================================================
+
+/// Move generation module for all piece types
+/// Generates pseudo-legal moves; legality is checked separately
 pub mod movegen {
     use super::*;
 
+    /// Check if a target square is valid for the given color
+    /// Valid = empty OR contains enemy piece
     #[inline(always)]
     fn is_valid_target(board: &Board, tar: Coord, color: Color) -> bool {
         match board.get(tar) {
@@ -740,6 +939,9 @@ pub mod movegen {
         }
     }
 
+    /// Generate pawn moves from a given position
+    /// - Forward move: always one step (Red toward y=0, Black toward y=9)
+    /// - Side moves: only available after crossing the river
     pub fn generate_pawn_moves(board: &Board, pos: Coord, color: Color) -> Vec<Coord> {
         let mut moves = Vec::new();
         let dir = if color == Color::Red { -1 } else { 1 };
@@ -761,8 +963,12 @@ pub mod movegen {
         moves
     }
 
+    /// Generate horse (ma) moves from position
+    /// Horse moves in L-shape: 2 squares in one direction + 1 square perpendicular
+    /// The intermediate square (knee) must be empty
     pub fn generate_horse_moves(board: &Board, pos: Coord, color: Color) -> Vec<Coord> {
         let mut moves = Vec::new();
+        // Each delta: (target_dx, target_dy, block_dx, block_dy)
         let deltas = [(2,1,1,0), (2,-1,1,0), (-2,1,-1,0), (-2,-1,-1,0),
             (1,2,0,1), (1,-2,0,-1), (-1,2,0,1), (-1,-2,0,-1)];
 
@@ -778,6 +984,8 @@ pub mod movegen {
         moves
     }
 
+    /// Generate chariot (ju) moves - rook-like sliding along rows and columns
+    /// Can move any distance until blocked; captures enemy pieces on the way
     pub fn generate_chariot_moves(board: &Board, pos: Coord, color: Color) -> Vec<Coord> {
         let mut moves = Vec::new();
         let dirs = [(0,1), (0,-1), (1,0), (-1,0)];
@@ -786,7 +994,7 @@ pub mod movegen {
             let mut x = pos.x + dx;
             let mut y = pos.y + dy;
 
-            while x >= 0 && x < 9 && y >= 0 && y < 10 {
+            while (0..9).contains(&x) && (0..10).contains(&y) {
                 let tar = Coord::new(x, y);
                 match board.get(tar) {
                     Some(p) => {
@@ -814,7 +1022,7 @@ pub mod movegen {
             let mut y = pos.y + dy;
             let mut jumped = false;
 
-            while x >= 0 && x < 9 && y >= 0 && y < 10 {
+            while (0..9).contains(&x) && (0..10).contains(&y) {
                 let tar = Coord::new(x, y);
                 match board.get(tar) {
                     Some(p) => {
@@ -841,6 +1049,8 @@ pub mod movegen {
         moves
     }
 
+    /// Generate elephant (xiang) moves - cannot cross the river
+    /// Moves 2 squares diagonally; intermediate eye square must be empty
     pub fn generate_elephant_moves(board: &Board, pos: Coord, color: Color) -> Vec<Coord> {
         let mut moves = Vec::new();
         let deltas = [(2,2,1,1), (2,-2,1,-1), (-2,2,-1,1), (-2,-2,-1,-1)];
@@ -857,6 +1067,7 @@ pub mod movegen {
         moves
     }
 
+    /// Generate advisor (shi) moves - confined to palace, diagonal steps only
     pub fn generate_advisor_moves(board: &Board, pos: Coord, color: Color) -> Vec<Coord> {
         let mut moves = Vec::new();
         let deltas = [(1,1), (1,-1), (-1,1), (-1,-1)];
@@ -871,6 +1082,8 @@ pub mod movegen {
         moves
     }
 
+    /// Generate king (jiang/shuai) moves - one step orthogonal, confined to palace
+    /// Also checks for face-to-face rule where kings cannot face each other on same file
     pub fn generate_king_moves(board: &Board, pos: Coord, color: Color) -> Vec<Coord> {
         let mut moves = Vec::new();
         let deltas = [(0,1), (0,-1), (1,0), (-1,0)];
@@ -885,14 +1098,17 @@ pub mod movegen {
         moves
     }
 
+    /// Generate all pseudo-legal moves for a color
+    /// Pseudo-legal = follows piece movement rules but may leave own king in check
+    /// Use generate_legal_moves() for moves that are truly legal
     pub fn generate_pseudo_moves(board: &Board, color: Color) -> Vec<Action> {
         let mut moves = Vec::with_capacity(60);
 
         for y in 0..10 {
             for x in 0..9 {
                 let pos = Coord::new(x as i8, y as i8);
-                if let Some(piece) = board.get(pos) {
-                    if piece.color == color {
+                if let Some(piece) = board.get(pos)
+                    && piece.color == color {
                         let targets = match piece.piece_type {
                             PieceType::Pawn => generate_pawn_moves(board, pos, color),
                             PieceType::Horse => generate_horse_moves(board, pos, color),
@@ -907,7 +1123,6 @@ pub mod movegen {
                             moves.push(Action::new(pos, tar, board.get(tar)));
                         }
                     }
-                }
             }
         }
 
@@ -965,8 +1180,13 @@ pub mod movegen {
         legal_captures
     }
 
+    // SEE values for finding least valuable attacker (different from MVV-LVA)
     const SEE_VALUE: [i32; 7] = [10000, 110, 110, 70, 320, 320, 600];
 
+    /// Static Exchange Evaluation (SEE)
+    /// Determines if a capture sequence is favorable by simulating trades
+    /// Positive value = winning capture, negative = losing capture
+    /// Used for move ordering and pruning bad captures
     pub fn see(board: &Board, src: Coord, tar: Coord) -> i32 {
         let mut swap_list = [0; 32];
         let mut swap_idx = 0;
@@ -1010,35 +1230,136 @@ pub mod movegen {
         score
     }
 
+    /// Find the least valuable piece that can attack a target square
+    /// Returns (position, value) of the attacker
+    /// Used by SEE to determine capture sequences
+    /// Optimized: searches outward from target instead of scanning all 90 squares
     fn find_least_valuable_attacker(board: &Board, tar: Coord, side: Color) -> (Option<Coord>, i32) {
         let mut min_value = i32::MAX;
         let mut min_attacker = None;
 
-        for y in 0..BOARD_HEIGHT {
-            for x in 0..BOARD_WIDTH {
-                let pos = Coord::new(x as i8, y as i8);
-                if let Some(piece) = board.get(pos) {
-                    if piece.color != side {
-                        continue;
-                    }
-                    let can_attack = match piece.piece_type {
-                        PieceType::Pawn => generate_pawn_moves(board, pos, side).contains(&tar),
-                        PieceType::Horse => generate_horse_moves(board, pos, side).contains(&tar),
-                        PieceType::Chariot => generate_chariot_moves(board, pos, side).contains(&tar),
-                        PieceType::Cannon => generate_cannon_moves(board, pos, side).contains(&tar),
-                        PieceType::Elephant => generate_elephant_moves(board, pos, side).contains(&tar),
-                        PieceType::Advisor => generate_advisor_moves(board, pos, side).contains(&tar),
-                        PieceType::King => generate_king_moves(board, pos, side).contains(&tar),
-                    };
+        // Search outward from target: O(1-16) for sliding pieces instead of O(90)
 
-                    if can_attack {
-                        let value = SEE_VALUE[piece.piece_type as usize];
-                        if value < min_value {
-                            min_value = value;
+        // Check chariot attacks (rook-like, searches along row/column)
+        let dirs = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+        for (dx, dy) in dirs {
+            let mut x = tar.x + dx;
+            let mut y = tar.y + dy;
+            let mut jumped = false;
+            while (0..9).contains(&x) && (0..10).contains(&y) {
+                let pos = Coord::new(x, y);
+                if let Some(piece) = board.get(pos) {
+                    if piece.color == side {
+                        // Chariot attacks if no pieces between
+                        if !jumped && piece.piece_type == PieceType::Chariot && SEE_VALUE[PieceType::Chariot as usize] < min_value {
+                            min_value = SEE_VALUE[PieceType::Chariot as usize];
+                            min_attacker = Some(pos);
+                        }
+                        // Cannon attacks if exactly one screen between
+                        if jumped && piece.piece_type == PieceType::Cannon && SEE_VALUE[PieceType::Cannon as usize] < min_value {
+                            min_value = SEE_VALUE[PieceType::Cannon as usize];
                             min_attacker = Some(pos);
                         }
                     }
+                    break;
                 }
+                x += dx;
+                y += dy;
+                jumped = true; // First piece encountered is the screen for cannon
+            }
+        }
+
+        // Check horse attacks (8 landing spots around target)
+        let horse_offsets = [(2, 1), (2, -1), (-2, 1), (-2, -1), (1, 2), (1, -2), (-1, 2), (-1, -2)];
+        let horse_blocks = [(1, 0), (1, 0), (-1, 0), (-1, 0), (0, 1), (0, -1), (0, 1), (0, -1)];
+        for i in 0..8 {
+            let (ox, oy) = horse_offsets[i];
+            let (bx, by) = horse_blocks[i];
+            let horse_pos = Coord::new(tar.x + ox, tar.y + oy);
+            let block_pos = Coord::new(tar.x + bx, tar.y + by);
+            if horse_pos.is_valid() && board.get(block_pos).is_none()
+                && let Some(piece) = board.get(horse_pos)
+                    && piece.color == side && piece.piece_type == PieceType::Horse && SEE_VALUE[PieceType::Horse as usize] < min_value {
+                        min_value = SEE_VALUE[PieceType::Horse as usize];
+                        min_attacker = Some(horse_pos);
+                    }
+        }
+
+        // Check elephant attacks (4 spots, must stay on same side of river)
+        let elephant_offsets = [(2, 2), (2, -2), (-2, 2), (-2, -2)];
+        let elephant_blocks = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+        for i in 0..4 {
+            let (ox, oy) = elephant_offsets[i];
+            let (bx, by) = elephant_blocks[i];
+            let ele_pos = Coord::new(tar.x + ox, tar.y + oy);
+            let block_pos = Coord::new(tar.x + bx, tar.y + by);
+            if ele_pos.is_valid() && !ele_pos.crosses_river(side) && board.get(block_pos).is_none()
+                && let Some(piece) = board.get(ele_pos)
+                    && piece.color == side && piece.piece_type == PieceType::Elephant && SEE_VALUE[PieceType::Elephant as usize] < min_value {
+                        min_value = SEE_VALUE[PieceType::Elephant as usize];
+                        min_attacker = Some(ele_pos);
+                    }
+        }
+
+        // Check advisor attacks (4 spots within palace)
+        let advisor_offsets = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+        for (ox, oy) in advisor_offsets {
+            let adv_pos = Coord::new(tar.x + ox, tar.y + oy);
+            if adv_pos.is_valid() && adv_pos.in_palace(side)
+                && let Some(piece) = board.get(adv_pos)
+                    && piece.color == side && piece.piece_type == PieceType::Advisor && SEE_VALUE[PieceType::Advisor as usize] < min_value {
+                        min_value = SEE_VALUE[PieceType::Advisor as usize];
+                        min_attacker = Some(adv_pos);
+                    }
+        }
+
+        // Check king attacks (4 adjacent squares within palace)
+        for (ox, oy) in dirs {
+            let king_pos = Coord::new(tar.x + ox, tar.y + oy);
+            if king_pos.is_valid() && king_pos.in_palace(side)
+                && let Some(piece) = board.get(king_pos)
+                    && piece.color == side && piece.piece_type == PieceType::King && SEE_VALUE[PieceType::King as usize] < min_value {
+                        min_value = SEE_VALUE[PieceType::King as usize];
+                        min_attacker = Some(king_pos);
+                    }
+        }
+
+        // Check pawn attacks
+        // Red pawns move toward y=0, so from target (tx, ty) the pawn is at (tx, ty+1) for forward
+        // Red side attacks from (tx+1, ty+1) or (tx-1, ty+1)
+        let pawn_offsets: &[(i8, i8)] = if side == Color::Red {
+            &[(0, 1)] // Red: pawn is at (tar.x, tar.y + 1) to attack tar
+        } else {
+            &[(0, -1)] // Black: pawn is at (tar.x, tar.y - 1) to attack tar
+        };
+        let pawn_diagonals: &[(i8, i8)] = if side == Color::Red {
+            &[(-1, 1), (1, 1)] // Red: pawn at (tar.x±1, tar.y+1) attacks tar
+        } else {
+            &[(-1, -1), (1, -1)] // Black: pawn at (tar.x±1, tar.y-1) attacks tar
+        };
+
+        // Forward attack
+        for (dx, dy) in pawn_offsets {
+            let pawn_pos = Coord::new(tar.x + dx, tar.y + dy);
+            if pawn_pos.is_valid()
+                && let Some(piece) = board.get(pawn_pos)
+                    && piece.color == side && piece.piece_type == PieceType::Pawn && SEE_VALUE[PieceType::Pawn as usize] < min_value {
+                        min_value = SEE_VALUE[PieceType::Pawn as usize];
+                        min_attacker = Some(pawn_pos);
+                    }
+        }
+
+        // Side attacks (only if pawn has crossed river)
+        let crosses_river = if side == Color::Red { tar.y <= 4 } else { tar.y >= 5 };
+        if crosses_river {
+            for (dx, dy) in pawn_diagonals {
+                let pawn_pos = Coord::new(tar.x + dx, tar.y + dy);
+                if pawn_pos.is_valid()
+                    && let Some(piece) = board.get(pawn_pos)
+                        && piece.color == side && piece.piece_type == PieceType::Pawn && SEE_VALUE[PieceType::Pawn as usize] < min_value {
+                            min_value = SEE_VALUE[PieceType::Pawn as usize];
+                            min_attacker = Some(pawn_pos);
+                        }
             }
         }
 
@@ -1095,11 +1416,11 @@ impl Board {
 
         let zobrist = get_zobrist();
         let mut zobrist_key = 0;
-        for y in 0..10 {
-            for x in 0..9 {
-                if let Some(p) = cells[y][x] {
+        for (y, row) in cells.iter().enumerate().take(10) {
+            for (x, &p) in row.iter().enumerate().take(9) {
+                if let Some(piece) = p {
                     let pos_idx = zobrist.pos_idx(Coord::new(x as i8, y as i8));
-                    zobrist_key ^= zobrist.pieces[pos_idx][p.color as usize][p.piece_type as usize];
+                    zobrist_key ^= zobrist.pieces[pos_idx][piece.color as usize][piece.piece_type as usize];
                 }
             }
         }
@@ -1145,8 +1466,9 @@ impl Board {
         self.cells[coord.y as usize][coord.x as usize] = piece;
     }
 
+    /// Execute a move on the board
+    /// Updates position, Zobrist hash, repetition history, and move flags
     pub fn make_move(&mut self, mut action: Action) {
-        // 安全检查：保留警告输出
         let Some(piece) = self.get(action.src) else {
             eprintln!("Warning: Invalid move from empty square {:?}", action.src);
             return;
@@ -1160,6 +1482,7 @@ impl Board {
         let prev_side = self.current_side;
         self.current_side = self.current_side.opponent();
 
+        // Check if move gives check and if it threatens captures (for repetition)
         action.is_check = self.is_check(self.current_side);
         action.is_capture_threat = self.is_capture_threat_internal(prev_side);
 
@@ -1167,6 +1490,7 @@ impl Board {
         *self.repetition_history.entry(self.zobrist_key).or_insert(0) += 1;
     }
 
+    /// Undo a move, restoring the previous position
     pub fn undo_move(&mut self, action: Action) {
         *self.repetition_history.get_mut(&self.zobrist_key).unwrap() -= 1;
         if self.repetition_history[&self.zobrist_key] == 0 {
@@ -1191,19 +1515,38 @@ impl Board {
 
         for y in 0..10 {
             for x in 0..9 {
-                if let Some(p) = self.cells[y][x] {
-                    if p.piece_type == PieceType::King {
+                if let Some(p) = self.cells[y][x]
+                    && p.piece_type == PieceType::King {
                         let coord = Coord::new(x as i8, y as i8);
                         match p.color {
                             Color::Red => red_king = Some(coord),
                             Color::Black => black_king = Some(coord),
                         }
                     }
-                }
             }
         }
 
         (red_king, black_king)
+    }
+
+    /// Returns piece counts for Red and Black as arrays indexed by PieceType
+    #[inline(always)]
+    pub fn piece_counts(&self) -> ([i32; 7], [i32; 7]) {
+        let mut red = [0; 7];
+        let mut black = [0; 7];
+
+        for row in &self.cells {
+            for &p in row {
+                if let Some(piece) = p {
+                    match piece.color {
+                        Color::Red => red[piece.piece_type as usize] += 1,
+                        Color::Black => black[piece.piece_type as usize] += 1,
+                    }
+                }
+            }
+        }
+
+        (red, black)
     }
 
     #[inline(always)]
@@ -1229,6 +1572,13 @@ impl Board {
         true
     }
 
+    /// Check if the king of the given color is in check
+    /// Checks for:
+    /// - Face-to-face kings (illegal in Xiangqi)
+    /// - Pawn attacks (forward and side attacks after crossing river)
+    /// - Horse attacks (with knee piece blocking)
+    /// - Chariot attacks (rook-like, same row/column)
+    /// - Cannon attacks (screen + target pattern)
     pub fn is_check(&self, color: Color) -> bool {
         let (rk, bk) = self.find_kings();
         let king_pos = match color {
@@ -1249,18 +1599,16 @@ impl Board {
 
         let pawn_dir = if color == Color::Red { -1 } else { 1 };
         let forward = Coord::new(king_pos.x, king_pos.y + pawn_dir);
-        if let Some(p) = self.get(forward) {
-            if p.color == opponent && p.piece_type == PieceType::Pawn {
+        if let Some(p) = self.get(forward)
+            && p.color == opponent && p.piece_type == PieceType::Pawn {
                 return true;
             }
-        }
         for dx in [-1, 1] {
             let side = Coord::new(king_pos.x + dx, king_pos.y);
-            if let Some(p) = self.get(side) {
-                if p.color == opponent && p.piece_type == PieceType::Pawn {
+            if let Some(p) = self.get(side)
+                && p.color == opponent && p.piece_type == PieceType::Pawn {
                     return true;
                 }
-            }
         }
 
         let horse_deltas = [(2,1), (2,-1), (-2,1), (-2,-1), (1,2), (1,-2), (-1,2), (-1,-2)];
@@ -1271,13 +1619,11 @@ impl Board {
             let pos = Coord::new(king_pos.x + dx, king_pos.y + dy);
             let block = Coord::new(king_pos.x + bx, king_pos.y + by);
 
-            if pos.is_valid() && self.get(block).is_none() {
-                if let Some(p) = self.get(pos) {
-                    if p.color == opponent && p.piece_type == PieceType::Horse {
+            if pos.is_valid() && self.get(block).is_none()
+                && let Some(p) = self.get(pos)
+                    && p.color == opponent && p.piece_type == PieceType::Horse {
                         return true;
                     }
-                }
-            }
         }
 
         let dirs = [(0,1), (0,-1), (1,0), (-1,0)];
@@ -1286,7 +1632,7 @@ impl Board {
             let mut y = king_pos.y + dy;
             let mut jumped = false;
 
-            while x >= 0 && x < 9 && y >= 0 && y < 10 {
+            while (0..9).contains(&x) && (0..10).contains(&y) {
                 let pos = Coord::new(x, y);
                 if let Some(p) = self.get(pos) {
                     if p.color == opponent {
@@ -1314,8 +1660,8 @@ impl Board {
         for y in 0..10 {
             for x in 0..9 {
                 let pos = Coord::new(x as i8, y as i8);
-                if let Some(piece) = self.get(pos) {
-                    if piece.color == attacker_color {
+                if let Some(piece) = self.get(pos)
+                    && piece.color == attacker_color {
                         let targets = match piece.piece_type {
                             PieceType::Pawn => movegen::generate_pawn_moves(self, pos, attacker_color),
                             PieceType::Horse => movegen::generate_horse_moves(self, pos, attacker_color),
@@ -1327,14 +1673,12 @@ impl Board {
                         };
 
                         for tar in targets {
-                            if let Some(target_piece) = self.get(tar) {
-                                if target_piece.color == opponent && target_piece.piece_type != PieceType::King {
+                            if let Some(target_piece) = self.get(tar)
+                                && target_piece.color == opponent && target_piece.piece_type != PieceType::King {
                                     return true;
                                 }
-                            }
                         }
                     }
-                }
             }
         }
 
@@ -1431,13 +1775,25 @@ impl fmt::Display for Board {
     }
 }
 
+// =============================================================================
+// POSITION EVALUATION
+// =============================================================================
+
+/// Position evaluation module using material + piece-square tables + heuristics
+/// Score is from Red's perspective: positive = Red ahead, negative = Black ahead
 pub mod eval {
     use super::*;
     use super::book::EndgameTablebase;
 
+    // Material values for midgame and endgame
+    // MG: midgame values (opening/middlegame)
+    // EG: endgame values (simplified positions)
     const MG_VALUE: [i32; 7] = [10000, 120, 120, 80, 350, 350, 650];
     const EG_VALUE: [i32; 7] = [10000, 120, 120, 200, 300, 250, 700];
 
+    // Piece-Square Tables: positional bonuses for each piece type
+    // Higher values = better squares
+    // Tables are symmetric for both colors (Black uses y-mirrored coordinates)
     const MG_PST_KING: [[i32; 9]; 10] = [
         [0, 0, 0, 20, 40, 20, 0, 0, 0],
         [0, 0, 0, 30, 50, 30, 0, 0, 0],
@@ -1555,8 +1911,10 @@ pub mod eval {
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
     ];
 
+    // Phase weights: King=0, Advisor=1, Elephant=1, Pawn=1, Horse=4, Cannon=4, Chariot=8
+    // Per side max: 2*1 + 2*1 + 5*1 + 2*4 + 2*4 + 2*8 = 41 (King excluded)
     const PHASE_WEIGHTS: [i32; 7] = [0, 1, 1, 1, 4, 4, 8];
-    const TOTAL_PHASE: i32 = 2 * (1 + 1 + 1 + 4 + 4 + 8);
+    const TOTAL_PHASE: i32 = 82; // 41 per side × 2 sides
 
     fn game_phase(board: &Board) -> f32 {
         let mut phase = 0;
@@ -1606,7 +1964,6 @@ pub mod eval {
 
     fn center_control(board: &Board, color: Color, phase: f32) -> i32 {
         let mut control = 0;
-        let _opponent = color.opponent();
 
         for y in 0..10 {
             for x in 0..9 {
@@ -1655,25 +2012,20 @@ pub mod eval {
 
     fn piece_coordination(board: &Board, color: Color, phase: f32) -> i32 {
         let mut coordination = 0;
-        let (rk, bk) = board.find_kings();
-        let _our_king = match color {
-            Color::Red => rk,
-            Color::Black => bk,
-        };
+        let (_rk, _bk) = board.find_kings();
         let enemy_king = match color {
-            Color::Red => bk,
-            Color::Black => rk,
+            Color::Red => _bk,
+            Color::Black => _rk,
         };
 
         let mut our_pieces = Vec::new();
         for y in 0..10 {
             for x in 0..9 {
                 let pos = Coord::new(x as i8, y as i8);
-                if let Some(piece) = board.get(pos) {
-                    if piece.color == color {
+                if let Some(piece) = board.get(pos)
+                    && piece.color == color {
                         our_pieces.push((piece, pos));
                     }
-                }
             }
         }
 
@@ -1715,7 +2067,7 @@ pub mod eval {
                     let mut y = pos.y + dy;
                     let mut platform_found = false;
 
-                    while x >= 0 && x < 9 && y >= 0 && y < 10 {
+                    while (0..9).contains(&x) && (0..10).contains(&y) {
                         let tar = Coord::new(x, y);
                         if let Some(p) = board.get(tar) {
                             if !platform_found {
@@ -1763,11 +2115,10 @@ pub mod eval {
 
             if tar.is_valid() && board.get(block).is_none() {
                 mobility += 1;
-                if let Some(p) = board.get(tar) {
-                    if p.color != color {
+                if let Some(p) = board.get(tar)
+                    && p.color != color {
                         mobility += 5;
                     }
-                }
             }
         }
         mobility
@@ -1782,7 +2133,7 @@ pub mod eval {
             let mut y = pos.y + dy;
             let mut platform_found = false;
 
-            while x >= 0 && x < 9 && y >= 0 && y < 10 {
+            while (0..9).contains(&x) && (0..10).contains(&y) {
                 let tar = Coord::new(x, y);
                 if board.get(tar).is_some() {
                     if !platform_found {
@@ -1813,25 +2164,23 @@ pub mod eval {
         let palace_deltas = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)];
         for (dx, dy) in palace_deltas {
             let pos = Coord::new(king_pos.x + dx, king_pos.y + dy);
-            if pos.is_valid() && pos.in_palace(color) {
-                if let Some(p) = board.get(pos) {
-                    if p.color == color {
+            if pos.is_valid() && pos.in_palace(color)
+                && let Some(p) = board.get(pos)
+                    && p.color == color {
                         safety += match p.piece_type {
                             PieceType::Advisor => 25,
                             PieceType::Elephant => 15,
                             _ => 5,
                         };
                     }
-                }
-            }
         }
 
         let mg_factor = phase;
         for y in 0..10 {
             for x in 0..9 {
                 let pos = Coord::new(x as i8, y as i8);
-                if let Some(p) = board.get(pos) {
-                    if p.color == opponent {
+                if let Some(p) = board.get(pos)
+                    && p.color == opponent {
                         let dist = (pos.x - king_pos.x).abs() + (pos.y - king_pos.y).abs();
                         let threat = match p.piece_type {
                             PieceType::Chariot => (14 - dist).max(0) as i32 * 10,
@@ -1842,7 +2191,6 @@ pub mod eval {
                         };
                         safety -= (threat as f32 * mg_factor) as i32;
                     }
-                }
             }
         }
 
@@ -1857,7 +2205,7 @@ pub mod eval {
             let mut x = pos.x + dx;
             let mut y = pos.y + dy;
 
-            while x >= 0 && x < 9 && y >= 0 && y < 10 {
+            while (0..9).contains(&x) && (0..10).contains(&y) {
                 let tar = Coord::new(x, y);
                 if board.get(tar).is_some() {
                     if board.get(tar).unwrap().color != color {
@@ -1880,21 +2228,19 @@ pub mod eval {
         for y in 0..10 {
             for x in 0..9 {
                 let pos = Coord::new(x as i8, y as i8);
-                if let Some(p) = board.get(pos) {
-                    if p.color == color && p.piece_type == PieceType::Pawn {
+                if let Some(p) = board.get(pos)
+                    && p.color == color && p.piece_type == PieceType::Pawn {
                         let left = Coord::new(pos.x - 1, pos.y);
                         let right = Coord::new(pos.x + 1, pos.y);
                         let mut linked = 0;
-                        if let Some(lp) = board.get(left) {
-                            if lp.color == color && lp.piece_type == PieceType::Pawn {
+                        if let Some(lp) = board.get(left)
+                            && lp.color == color && lp.piece_type == PieceType::Pawn {
                                 linked += 1;
                             }
-                        }
-                        if let Some(rp) = board.get(right) {
-                            if rp.color == color && rp.piece_type == PieceType::Pawn {
+                        if let Some(rp) = board.get(right)
+                            && rp.color == color && rp.piece_type == PieceType::Pawn {
                                 linked += 1;
                             }
-                        }
                         score += linked * (20.0 + 30.0 * eg_factor) as i32;
 
                         if eg_factor > 0.5 && pos.crosses_river(color) {
@@ -1908,7 +2254,6 @@ pub mod eval {
                             }
                         }
                     }
-                }
             }
         }
         score * color.sign()
@@ -1921,11 +2266,10 @@ pub mod eval {
         for y in 0..10 {
             for x in 0..9 {
                 let pos = Coord::new(x as i8, y as i8);
-                if let Some(p) = board.get(pos) {
-                    if p.color == color && p.piece_type == PieceType::Elephant {
+                if let Some(p) = board.get(pos)
+                    && p.color == color && p.piece_type == PieceType::Elephant {
                         elephants.push(pos);
                     }
-                }
             }
         }
 
@@ -1943,12 +2287,11 @@ pub mod eval {
                     let moves = movegen::generate_elephant_moves(board, *pos, color);
                     let mut protected = false;
                     for m in moves {
-                        if let Some(p) = board.get(m) {
-                            if p.color == color && (p.piece_type == PieceType::Advisor || p.piece_type == PieceType::Pawn) {
+                        if let Some(p) = board.get(m)
+                            && p.color == color && (p.piece_type == PieceType::Advisor || p.piece_type == PieceType::Pawn) {
                                 protected = true;
                                 break;
                             }
-                        }
                     }
                     if !protected {
                         score -= 30;
@@ -1986,10 +2329,10 @@ pub mod eval {
 
         let (rk, bk) = board.find_kings();
         if rk.is_none() {
-            return if side == Color::Red { -100000 } else { 100000 };
+            return if side == Color::Red { -MATE_SCORE } else { MATE_SCORE };
         }
         if bk.is_none() {
-            return if side == Color::Red { 100000 } else { -100000 };
+            return if side == Color::Red { MATE_SCORE } else { -MATE_SCORE };
         }
 
         let phase = game_phase(board);
@@ -1998,8 +2341,8 @@ pub mod eval {
         for y in 0..10 {
             for x in 0..9 {
                 if let Some(piece) = board.cells[y][x] {
-                    let x_usize = x as usize;
-                    let y_usize = y as usize;
+                    let x_usize = x;
+                    let y_usize = y;
                     let sign = if piece.color == Color::Red { 1 } else { -1 };
                     let pos = Coord::new(x as i8, y as i8);
 
@@ -2034,40 +2377,58 @@ pub mod eval {
             score += ks_red;
         }
         if let Some(ks_black) = king_safety(board, Color::Black, phase) {
-            score -= ks_black;
+            score += ks_black;
         }
 
         score += pawn_structure(board, Color::Red, phase);
-        score -= pawn_structure(board, Color::Black, phase);
+        score += pawn_structure(board, Color::Black, phase);
 
         score += center_control(board, Color::Red, phase);
-        score -= center_control(board, Color::Black, phase);
+        score += center_control(board, Color::Black, phase);
         score += piece_coordination(board, Color::Red, phase);
-        score -= piece_coordination(board, Color::Black, phase);
+        score += piece_coordination(board, Color::Black, phase);
 
         score += elephant_structure(board, Color::Red, phase);
-        score -= elephant_structure(board, Color::Black, phase);
+        score += elephant_structure(board, Color::Black, phase);
 
         if board.is_check(Color::Black) {
-            score += 50;
+            score += CHECK_BONUS;
         }
         if board.is_check(Color::Red) {
-            score -= 50;
+            score -= CHECK_BONUS;
         }
 
         if side == Color::Red { score } else { -score }
     }
 }
 
+// =============================================================================
+// SEARCH ALGORITHMS
+// =============================================================================
+
+/// Search module implementing:
+/// - MTDF (Memory-enhanced Test Driver) for root search
+/// - Zero-Window Search (PVS-style) for move ordering
+/// - Quiescence Search with SEE for capture stabilization
+/// - Late Move Reductions (LMR) for search efficiency
+/// - Null Move Pruning for pruning non-critical positions
+/// - Futility Pruning near leaf nodes
 pub mod search {
     use super::*;
     use eval::evaluate;
     use movegen::*;
     use super::book::OpeningBook;
 
+    /// Thread-safe transposition table shared across search threads
     #[derive(Clone)]
     pub struct SharedTT {
         pub tt: Arc<RwLock<TranspositionTable>>,
+    }
+
+    impl Default for SharedTT {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl SharedTT {
@@ -2127,6 +2488,12 @@ pub mod search {
         pub counter_moves: [[Option<Action>; 90]; 90],
     }
 
+    impl Default for ThreadContext {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl ThreadContext {
         pub fn new() -> Self {
             ThreadContext {
@@ -2182,11 +2549,10 @@ pub mod search {
 
         pub fn sort_moves(
             &self,
-            moves: &mut Vec<Action>,
+            moves: &mut [Action],
             tt_move: Option<Action>,
             prev_action: Option<Action>,
             depth: u8,
-            is_in_check: bool,
             board: &Board,
         ) {
             let depth_idx = depth as usize;
@@ -2199,22 +2565,14 @@ pub mod search {
                     return b_is_tt.cmp(&a_is_tt);
                 }
 
-                if is_in_check {
-                    let a_see = see(board, a.src, a.tar);
-                    let b_see = see(board, b.src, b.tar);
-                    if a_see != b_see {
-                        return b_see.cmp(&a_see);
-                    }
-                }
-
-                if a.is_check != b.is_check {
-                    return b.is_check.cmp(&a.is_check);
-                }
-
                 let a_see = see(board, a.src, a.tar);
                 let b_see = see(board, b.src, b.tar);
                 if a_see != b_see {
                     return b_see.cmp(&a_see);
+                }
+
+                if a.is_check != b.is_check {
+                    return b.is_check.cmp(&a.is_check);
                 }
 
                 let a_mvv = a.mvv_lva_score();
@@ -2223,12 +2581,12 @@ pub mod search {
                     return b_mvv.cmp(&a_mvv);
                 }
 
-                let a_is_counter = prev_action.map_or(false, |pa| {
+                let a_is_counter = prev_action.is_some_and(|pa| {
                     let prev_from = zobrist.pos_idx(pa.src);
                     let prev_to = zobrist.pos_idx(pa.tar);
                     self.counter_moves[prev_from][prev_to] == Some(*a)
                 });
-                let b_is_counter = prev_action.map_or(false, |pa| {
+                let b_is_counter = prev_action.is_some_and(|pa| {
                     let prev_from = zobrist.pos_idx(pa.src);
                     let prev_to = zobrist.pos_idx(pa.tar);
                     self.counter_moves[prev_from][prev_to] == Some(*b)
@@ -2237,8 +2595,8 @@ pub mod search {
                     return b_is_counter.cmp(&a_is_counter);
                 }
 
-                let a_is_killer = self.killer_moves[depth_idx].contains(&Some(*a));
-                let b_is_killer = self.killer_moves[depth_idx].contains(&Some(*b));
+                let a_is_killer = depth_idx < self.killer_moves.len() && self.killer_moves[depth_idx].contains(&Some(*a));
+                let b_is_killer = depth_idx < self.killer_moves.len() && self.killer_moves[depth_idx].contains(&Some(*b));
                 if a_is_killer != b_is_killer {
                     return b_is_killer.cmp(&a_is_killer);
                 }
@@ -2252,6 +2610,12 @@ pub mod search {
         }
     }
 
+    /// Quiescence Search - evaluates only "quiet" positions
+    /// Continues searching captures and checks until position is stable
+    /// Prevents the "horizon effect" where search depth cuts off during a sequence
+    /// Uses SEE (Static Exchange Evaluation) to order captures efficiently
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::only_used_in_recursion)]
     pub fn quiescence(
         board: &mut Board,
         thread_ctx: &mut ThreadContext,
@@ -2273,12 +2637,12 @@ pub mod search {
         }
 
         if let Some(winner) = board.is_repetition_violation() {
-            return if winner == side { 100000 } else { -100000 };
+            return if winner == side { MATE_SCORE } else { -MATE_SCORE };
         }
 
         let key = board.zobrist_key;
-        if let Some(entry) = shared_tt.probe(key) {
-            if entry.depth >= depth {
+        if let Some(entry) = shared_tt.probe(key)
+            && entry.depth >= depth {
                 match entry.entry_type {
                     TTEntryType::Exact => return entry.value,
                     TTEntryType::Lower => alpha = alpha.max(entry.value),
@@ -2288,7 +2652,6 @@ pub mod search {
                     return entry.value;
                 }
             }
-        }
 
         let stand_pat = evaluate(board, side);
         if stand_pat >= beta {
@@ -2307,7 +2670,7 @@ pub mod search {
             captures
         };
 
-        moves.sort_by(|a, b| see(board, b.src, b.tar).cmp(&see(board, a.src, a.tar)));
+        moves.sort_by_key(|b| std::cmp::Reverse(see(board, b.src, b.tar)));
 
         let original_alpha = alpha;
         let mut best_eval = stand_pat;
@@ -2354,6 +2717,11 @@ pub mod search {
         best_eval
     }
 
+    /// Zero-Window Search (Principal Variation Search variant)
+    /// Searches with a narrow window [alpha, beta] = [beta-1, beta]
+    /// More efficient than full alpha-beta when move ordering is good
+    /// Returns a bound on the position value (not exact)
+    #[allow(clippy::too_many_arguments)]
     pub fn zw_search(
         board: &mut Board,
         thread_ctx: &mut ThreadContext,
@@ -2378,11 +2746,11 @@ pub mod search {
         }
 
         if let Some(winner) = board.is_repetition_violation() {
-            return if winner == side { 100000 } else { -100000 };
+            return if winner == side { MATE_SCORE } else { -MATE_SCORE };
         }
 
-        if let Some(entry) = shared_tt.probe(key) {
-            if entry.depth >= depth {
+        if let Some(entry) = shared_tt.probe(key)
+            && entry.depth >= depth {
                 match entry.entry_type {
                     TTEntryType::Exact => {
                         *best_action = entry.best_move;
@@ -2400,7 +2768,6 @@ pub mod search {
                     }
                 }
             }
-        }
 
         if depth == 0 {
             return quiescence(board, thread_ctx, shared_tt, alpha, beta, side, 0, time_ctx);
@@ -2409,14 +2776,14 @@ pub mod search {
         let mut moves = generate_legal_moves(board, side);
         if moves.is_empty() {
             return if is_in_check {
-                -100000 + (MAX_DEPTH - depth) as i32
+                -MATE_SCORE + (MAX_DEPTH - depth) as i32
             } else {
                 0
             };
         }
 
         let is_endgame = evaluate(board, side).abs() < ENDGAME_THRESHOLD;
-        if !pv_node && !is_in_check && !is_endgame && depth >= NULL_MOVE_REDUCTION + 1 {
+        if !pv_node && !is_in_check && !is_endgame && depth > NULL_MOVE_REDUCTION {
             let zobrist = get_zobrist();
             board.zobrist_key ^= zobrist.side;
             board.current_side = board.current_side.opponent();
@@ -2443,8 +2810,49 @@ pub mod search {
             }
         }
 
+        // Internal Iterative Deepening: if no TT move at depth-2, search shallow to find one
+        // This improves move ordering especially in the midgame
         let tt_move = shared_tt.probe(key).and_then(|e| e.best_move);
-        thread_ctx.sort_moves(&mut moves, tt_move, prev_action, depth, is_in_check, board);
+        let tt_move = if tt_move.is_none() && depth >= 4 && !is_in_check {
+            let mut dummy_best = None;
+            zw_search(
+                board, thread_ctx, shared_tt, depth - 2, beta,
+                side, false, &mut dummy_best, time_ctx, extension_count, prev_action
+            );
+            shared_tt.probe(key).and_then(|e| e.best_move)
+        } else {
+            tt_move
+        };
+
+        let is_endgame = evaluate(board, side).abs() < ENDGAME_THRESHOLD;
+        let static_eval = evaluate(board, side);
+        if !pv_node && !is_in_check && !is_endgame && depth > NULL_MOVE_REDUCTION {
+            let zobrist = get_zobrist();
+            board.zobrist_key ^= zobrist.side;
+            board.current_side = board.current_side.opponent();
+
+            let null_depth = depth - 1 - NULL_MOVE_REDUCTION;
+            let null_eval = -zw_search(
+                board, thread_ctx, shared_tt, null_depth, -alpha,
+                side.opponent(), false, &mut None, time_ctx, extension_count, None
+            );
+
+            board.zobrist_key ^= zobrist.side;
+            board.current_side = board.current_side.opponent();
+
+            if null_eval >= beta && !time_ctx.is_time_up() {
+                return beta;
+            }
+        }
+
+        if !pv_node && !is_in_check && depth <= 3 {
+            let futility_margin = FUTILITY_MARGIN * depth as i32;
+            if static_eval + futility_margin <= alpha {
+                return static_eval;
+            }
+        }
+
+        thread_ctx.sort_moves(&mut moves, tt_move, prev_action, depth, board);
 
         let mut best_eval = -i32::MAX;
         let mut current_best_move = None;
@@ -2468,9 +2876,28 @@ pub mod search {
 
             board.make_move(*action);
 
+            // History pruning: skip late moves with poor history at high depths
+            let history_score = {
+                let zobrist = get_zobrist();
+                thread_ctx.history_table[zobrist.pos_idx(action.src)][zobrist.pos_idx(action.tar)]
+            };
+            let skip_move = depth > 6
+                && move_idx >= 8
+                && !gives_check
+                && !is_in_check
+                && action.captured.is_none()
+                && history_score < 50
+                && !is_endgame
+                && static_eval > alpha - 100;
+
             let mut eval;
-            if has_pv && !pv_node && !is_in_check && !gives_check && action.captured.is_none() && move_idx >= LMR_MIN_MOVES && depth >= 3 {
-                let reduced_depth = depth - 2;
+            if skip_move {
+                board.undo_move(*action);
+                continue;
+            } else if has_pv && !pv_node && !is_in_check && !gives_check && action.captured.is_none() && move_idx >= LMR_MIN_MOVES && depth >= 3 {
+                // Enhanced LMR: reduce more in midgame, less in endgame
+                let lmr_reduction = if is_endgame { 1 } else { 2 };
+                let reduced_depth = depth - 1 - lmr_reduction;
                 eval = -zw_search(
                     board, thread_ctx, shared_tt, reduced_depth, -alpha,
                     side.opponent(), false, &mut None, time_ctx, new_extension_count, Some(*action)
@@ -2529,6 +2956,10 @@ pub mod search {
         best_eval
     }
 
+    /// MTDF (Memory-enhanced Test Driver)
+    /// Uses zero-window search to converge on the true value
+    /// More efficient than iterative deepening for repeated searches
+    #[allow(clippy::too_many_arguments)]
     pub fn mtdf(
         board: &mut Board,
         thread_ctx: &mut ThreadContext,
@@ -2539,8 +2970,8 @@ pub mod search {
         best_action: &mut Option<Action>,
         time_ctx: &TimeContext,
     ) -> i32 {
-        let mut lower_bound = -100000;
-        let mut upper_bound = 100000;
+        let mut lower_bound = -MATE_SCORE;
+        let mut upper_bound = MATE_SCORE;
         let mut guess = first_guess;
         let mut current_best = None;
 
@@ -2569,6 +3000,7 @@ pub mod search {
         guess
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn search_with_aspiration(
         board: &mut Board,
         thread_ctx: &mut ThreadContext,
@@ -2583,8 +3015,8 @@ pub mod search {
             return mtdf(board, thread_ctx, shared_tt, depth, 0, side, best_action, time_ctx);
         }
 
-        let mut alpha = -100000;
-        let mut beta = 100000;
+        let mut alpha = -MATE_SCORE;
+        let mut beta = MATE_SCORE;
         let mut score = prev_score;
         let mut window = ASPIRATION_WINDOW;
 
@@ -2641,37 +3073,50 @@ pub mod search {
         mut board: Board,
         shared_tt: SharedTT,
         time_ctx: TimeContext,
-        thread_id: usize,
+        current_depth: Arc<Mutex<u8>>, // Shared depth counter for work stealing
         result_sender: std::sync::mpsc::Sender<(u8, i32, Option<Action>)>,
+        search_limit: u8, // Maximum depth to search
     ) {
         let mut thread_ctx = ThreadContext::new();
-        let mut last_guess = 0;
         let side = board.current_side;
+        let mut last_guess = 0;
 
-        let start_depth = if thread_id == 0 { 1 } else { thread_id as u8 % 3 + 1 };
-
-        for depth in start_depth..=MAX_DEPTH {
+        loop {
+            // Check time first
             if time_ctx.is_time_up() {
                 break;
             }
 
+            // Get next depth atomically (work-stealing)
+            let depth = {
+                let mut guard = current_depth.lock().unwrap();
+                if *guard > search_limit {
+                    break; // All depths exhausted
+                }
+                let d = *guard;
+                *guard += 1;
+                d
+            };
+
             let mut current_best = None;
+
+            // Search at this depth
             let score = search_with_aspiration(
                 &mut board, &mut thread_ctx, &shared_tt,
                 depth, last_guess, side, &mut current_best, &time_ctx
             );
 
+            // Update guess for next iteration
+            last_guess = score;
+
             if !time_ctx.is_time_up() {
-                last_guess = score;
                 thread_ctx.age_tables();
                 let _ = result_sender.send((depth, score, current_best));
-            } else {
-                break;
             }
         }
     }
 
-    pub fn find_best_move(board: &mut Board, _max_depth: u8, side: Color) -> Option<Action> {
+    pub fn find_best_move(board: &mut Board, max_depth: u8, side: Color) -> Option<Action> {
         if board.move_history.len() < 15 {
             static BOOK: OnceLock<OpeningBook> = OnceLock::new();
             let book = BOOK.get_or_init(OpeningBook::new);
@@ -2698,17 +3143,24 @@ pub mod search {
             nodes_searched: Arc::clone(&nodes_searched),
         };
 
+        // Shared depth counter for work-stealing approach
+        // Threads grab the next depth to search atomically
+        // Start at depth 1, end at max_depth (capped by MAX_DEPTH)
+        let search_limit = max_depth.min(MAX_DEPTH);
+        let current_depth = Arc::new(Mutex::new(1u8));
+
         let (result_sender, result_receiver) = std::sync::mpsc::channel();
         let mut handles = Vec::with_capacity(SEARCH_THREADS);
 
-        for thread_id in 0..SEARCH_THREADS {
+        for _ in 0..SEARCH_THREADS {
             let board_clone = board.clone();
             let tt_clone = shared_tt.clone();
             let time_ctx_clone = time_ctx.clone();
+            let depth_clone = Arc::clone(&current_depth);
             let sender_clone = result_sender.clone();
 
             let handle = thread::spawn(move || {
-                worker_thread(board_clone, tt_clone, time_ctx_clone, thread_id, sender_clone);
+                worker_thread(board_clone, tt_clone, time_ctx_clone, depth_clone, sender_clone, search_limit);
             });
             handles.push(handle);
         }
@@ -2720,7 +3172,7 @@ pub mod search {
         });
 
         let mut best_depth = 0;
-        let mut best_score = -100000;
+        let mut best_score = -MATE_SCORE;
         let mut final_best_action = legal_moves.first().copied();
 
         while !time_ctx.is_time_up() {
@@ -2881,7 +3333,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("\n请输入你的走法 (格式: x1 y1 x2 y2)：");
             input.clear();
             stdin.read_line(&mut input)?;
-            let parts: Vec<&str> = input.trim().split_whitespace().collect();
+            let parts: Vec<&str> = input.split_whitespace().collect();
 
             if parts.len() != 4 {
                 println!("输入格式错误，请重新输入！");
