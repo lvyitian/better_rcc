@@ -3193,7 +3193,7 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
                     match piece.piece_type {
                         PieceType::Horse => {
                             let mob = horse_mobility(board, pos, piece.color);
-                            score += mob * sign * 5;
+                            score += mob * sign;
                             // Activity bonus: forward progress (5th/6th rank)
                             let forward_rank = match piece.color {
                                 Color::Red => pos.y >= 4 && pos.y <= 5,  // Red's 5th and 6th ranks
@@ -3205,7 +3205,7 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
                         }
                         PieceType::Chariot => {
                             let mob = chariot_mobility(board, pos, piece.color);
-                            score += mob * sign * 5;
+                            score += mob * sign;
                             // Activity bonus: on enemy back two rows
                             let on_enemy_back_rank = match piece.color {
                                 Color::Red => pos.y <= 1,    // Red attacking Black's back rank (y=8,9)
