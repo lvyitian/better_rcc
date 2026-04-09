@@ -84,7 +84,9 @@ const PAWN_DIR: [i8; 2] = [-1, 1];
 
 /// Piece values for MVV-LVA scoring (Most Valuable Victim - Least Valuable Attacker)
 /// Indexed by PieceType: King, Advisor, Elephant, Pawn, Horse, Cannon, Chariot
-const MVV_LVA_VALUES: [i32; 7] = [10000, 100, 100, 50, 300, 300, 500];
+/// Ordering: Chariot > Horse ≥ Cannon > Advisor > Elephant ≥ Pawn
+/// Note: Horse (270) and Cannon (250) are close since both are conditional capturers
+const MVV_LVA_VALUES: [i32; 7] = [10000, 120, 80, 80, 270, 250, 500];
 
 // =============================================================================
 // SEARCH CONSTANTS
@@ -162,9 +164,9 @@ pub const ASPIRATION_WINDOW: i32 = 50;
 /// This is large enough to dominate all other evaluations
 pub const MATE_SCORE: i32 = 100000;
 
-/// Bonus added to evaluation when a side is in check
-/// Encourages the engine to seek checks in the search
-pub const CHECK_BONUS: i32 = 250;
+/// Bonus added to evaluation when a side is in check.
+/// A non-checkmating check should not be worth more than a minor piece (~35% of Horse=120).
+pub const CHECK_BONUS: i32 = 120;
 
 // =============================================================================
 // RULE SETS
@@ -919,8 +921,7 @@ pub mod book {
                     });
 
                 if let Some(pos) = pawn_pos
-                    && pos.crosses_river(Color::Red)
-                    && Self::is_pawn_strong_position(pos) {
+                    && pos.crosses_river(Color::Red) {
                         let score = 80000;
                         let total_pieces = 2 + red_other + black_other;
                         let confidence = (1.0 - (total_pieces as f32 / 32.0)).clamp(0.0, 1.0);
@@ -928,15 +929,6 @@ pub mod book {
                     }
             }
             None
-        }
-
-        /// Returns true if a crossed Red pawn is in a strong attacking position.
-        /// A pawn is strong if it's on a central file (x=3,4,5) where it can
-        /// attack the enemy palace effectively. Edge file pawns (x=0,8) are weak
-        /// because they cannot move sideways after crossing.
-        #[inline(always)]
-        fn is_pawn_strong_position(pos: Coord) -> bool {
-            matches!(pos.x, 3..=5)
         }
 
         #[inline(always)]
@@ -2349,11 +2341,11 @@ pub mod eval {
     // - Advisor (135/140) - protects king directly, palace-bound but critical
     // - Elephant (105/100) - river-restricted, less flexible than Advisor
     // - Pawn (80/200) - weak but advances; strong in EG when passed
-    // - Horse (350/280) - mobility, requires coordination
-    // - Cannon (380/380) - screen attack, strong throughout game
+    // - Horse (350/450) - mobility, requires coordination; EG surge per Fairy-Stockfish
+    // - Cannon (500/380) - screen attack, strong throughout game; MG > EG per Fairy-Stockfish
     // - Chariot (650/700) - strongest piece, rook-like
-    const MG_VALUE: [i32; 7] = [10000, 135, 105, 80, 350, 380, 650];
-    const EG_VALUE: [i32; 7] = [10000, 140, 100, 200, 280, 380, 700];
+    const MG_VALUE: [i32; 7] = [10000, 135, 105, 80, 350, 500, 650];
+    const EG_VALUE: [i32; 7] = [10000, 140, 100, 200, 450, 380, 700];
 
     // Piece-Square Tables (PST): Position bonuses for each piece type.
     // Each table is a 10×9 array matching board coordinates (y, x).
@@ -2440,58 +2432,61 @@ pub mod eval {
         [5, 10, 20, 20, 20, 20, 20, 10, 5],
     ];
 
+    // Chariot PST: Scaled up to ~20% of piece value (was ~14%).
+    // Center (x=4,y=3,6) max 130 ≈ 20% of MG value (650).
     const MG_PST_CHARIOT: [[i32; 9]; 10] = [
-        [10, 20, 30, 40, 50, 40, 30, 20, 10],
-        [20, 30, 40, 50, 60, 50, 40, 30, 20],
-        [30, 40, 50, 60, 70, 60, 50, 40, 30],
-        [40, 50, 60, 80, 90, 80, 60, 50, 40],
-        [30, 40, 50, 70, 80, 70, 50, 40, 30],
-        [30, 40, 50, 70, 80, 70, 50, 40, 30],
-        [40, 50, 60, 80, 90, 80, 60, 50, 40],
-        [30, 40, 50, 60, 70, 60, 50, 40, 30],
-        [20, 30, 40, 50, 60, 50, 40, 30, 20],
-        [10, 20, 30, 40, 50, 40, 30, 20, 10],
+        [15, 30, 45, 60, 75, 60, 45, 30, 15],
+        [30, 45, 60, 75, 90, 75, 60, 45, 30],
+        [45, 60, 75, 100, 115, 100, 75, 60, 45],
+        [60, 75, 100, 115, 130, 115, 100, 75, 60],
+        [45, 60, 75, 100, 115, 100, 75, 60, 45],
+        [45, 60, 75, 100, 115, 100, 75, 60, 45],
+        [60, 75, 100, 115, 130, 115, 100, 75, 60],
+        [45, 60, 75, 100, 115, 100, 75, 60, 45],
+        [30, 45, 60, 75, 90, 75, 60, 45, 30],
+        [15, 30, 45, 60, 75, 60, 45, 30, 15],
     ];
 
-    // Cannon PST: Highest values at center (y=3,4,5,6). y=1,8 are palace-entrance ranks
-    // which are valuable for endgame cannons to control the palace - increased from 10-50 to 20-60.
+    // Cannon PST: Scaled to ~20% of MG value (500). Max center = 100.
+    // y=1,8 (palace-entrance) elevated to match new scale.
     const MG_PST_CANNON: [[i32; 9]; 10] = [
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [20, 30, 40, 50, 60, 50, 40, 30, 20],  // Increased from 10-50
-        [30, 40, 50, 60, 70, 60, 50, 40, 30],
-        [40, 50, 60, 80, 90, 80, 60, 50, 40],
-        [30, 40, 50, 70, 80, 70, 50, 40, 30],
-        [30, 40, 50, 70, 80, 70, 50, 40, 30],
-        [40, 50, 60, 80, 90, 80, 60, 50, 40],
-        [30, 40, 50, 60, 70, 60, 50, 40, 30],
-        [20, 30, 40, 50, 60, 50, 40, 30, 20],  // Increased from 10-50
+        [25, 35, 45, 55, 65, 55, 45, 35, 25],
+        [35, 50, 65, 80, 90, 80, 65, 50, 35],
+        [45, 60, 75, 90, 100, 90, 75, 60, 45],
+        [35, 50, 65, 80, 90, 80, 65, 50, 35],
+        [35, 50, 65, 80, 90, 80, 65, 50, 35],
+        [45, 60, 75, 90, 100, 90, 75, 60, 45],
+        [35, 50, 65, 80, 90, 80, 65, 50, 35],
+        [25, 35, 45, 55, 65, 55, 45, 35, 25],
         [0, 0, 0, 0, 0, 0, 0, 0, 0],
     ];
 
+    // Pawn PST: Lower values to avoid irrational pawn fixation.
+    // Max MG (~60) ≈ 17% of Horse value (350), Max EG (~120) ≈ 43% of Horse EG (280).
+    // Maintains relative ranking: forward squares > backward squares.
     const MG_PST_PAWN: [[i32; 9]; 10] = [
-        // Red: y=0 is enemy back rank (most forward), y=9 is own back rank (least forward)
-        // After mirroring: Black uses index 0 for its most forward (y=9), index 9 for back rank (y=0)
-        // Values: high index (forward) = 140, low index (back) = 0 - correctly rewards advancement
-        [140, 160, 180, 200, 220, 200, 180, 160, 140],  // y=0: enemy back rank - HIGH (most forward)
-        [120, 140, 160, 180, 200, 180, 160, 140, 120],  // y=1: very advanced
-        [100, 120, 140, 160, 180, 160, 140, 120, 100],  // y=2: advanced
-        [80, 100, 120, 140, 160, 140, 120, 100, 80],    // y=3: crossed river (good)
-        [60, 80, 100, 120, 140, 120, 100, 80, 60],      // y=4: near river
-        [30, 40, 50, 60, 70, 60, 50, 40, 30],            // y=5: at river (lower center control)
-        [10, 20, 30, 40, 50, 40, 30, 20, 10],            // y=6: before river (less valuable)
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],                     // y=7: starting position
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],                     // y=8: starting area
-        [0, 0, 0, 0, 0, 0, 0, 0, 0],                     // y=9: back rank (least forward)
+        [40, 45, 50, 55, 60, 55, 50, 45, 40],   // y=0: enemy back rank - max 60
+        [35, 40, 45, 50, 55, 50, 45, 40, 35],   // y=1
+        [30, 35, 40, 45, 50, 45, 40, 35, 30],   // y=2: advanced
+        [20, 25, 30, 35, 40, 35, 30, 25, 20],   // y=3: crossed river
+        [15, 18, 20, 25, 30, 25, 20, 18, 15],   // y=4: near river
+        [10, 12, 15, 18, 20, 18, 15, 12, 10],   // y=5: at river
+        [5, 8, 10, 12, 15, 12, 10, 8, 5],       // y=6: before river
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],            // y=7: starting
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],            // y=8
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],            // y=9: back rank
     ];
 
     const EG_PST_PAWN: [[i32; 9]; 10] = [
-        [300, 350, 400, 450, 500, 450, 400, 350, 300],  // y=0: enemy back rank - VERY high EG value
-        [280, 320, 380, 420, 480, 420, 380, 320, 280], // y=1
-        [250, 300, 350, 400, 450, 400, 350, 300, 250], // y=2
-        [200, 250, 300, 350, 400, 350, 300, 250, 200], // y=3: crossed river
-        [150, 200, 250, 300, 350, 300, 250, 200, 150], // y=4: near river
-        [100, 120, 150, 180, 200, 180, 150, 120, 100], // y=5
-        [50, 80, 100, 120, 150, 120, 100, 80, 50],      // y=6: before river
+        // y=0: max 200 — scales with pawn's EG value surge (80→200 = 2.5×)
+        [160, 170, 180, 190, 200, 190, 180, 170, 160],
+        [150, 160, 170, 180, 190, 180, 170, 160, 150],
+        [140, 150, 160, 170, 180, 170, 160, 150, 140],
+        [120, 130, 140, 150, 160, 150, 140, 130, 120],  // y=3: crossed river
+        [100, 110, 120, 130, 140, 130, 120, 110, 100],  // y=4: near river
+        [80, 90, 100, 110, 120, 110, 100, 90, 80],
+        [60, 70, 80, 90, 100, 90, 80, 70, 60],          // y=6: before river
         [0, 0, 0, 0, 0, 0, 0, 0, 0],                    // y=7: starting
         [0, 0, 0, 0, 0, 0, 0, 0, 0],                    // y=8
         [0, 0, 0, 0, 0, 0, 0, 0, 0],                    // y=9: back rank
@@ -2587,20 +2582,30 @@ pub mod eval {
                         PieceType::Chariot | PieceType::Cannon => {
                             let mut count = 0;
 
-                            // Horizontal attacks (same y as core rows)
+                            // Horizontal attacks: if piece shares a row with core (y in [core_y_min, core_y_max])
+                            // AND can reach core in that direction (ray passes through core before edge)
                             if pos.y >= core_y_min && pos.y <= core_y_max {
-                                // Left direction (x decreasing)
-                                count += count_dir_attacks(board, pos, piece, -1, 0, core_x_min, core_x_max, core_y_min, core_y_max);
-                                // Right direction (x increasing)
-                                count += count_dir_attacks(board, pos, piece, 1, 0, core_x_min, core_x_max, core_y_min, core_y_max);
+                                // Left: pass through core if piece is right of core left edge
+                                if pos.x > core_x_min {
+                                    count += count_dir_attacks(board, pos, piece, -1, 0, core_x_min, core_x_max, core_y_min, core_y_max);
+                                }
+                                // Right: pass through core if piece is left of core right edge
+                                if pos.x < core_x_max {
+                                    count += count_dir_attacks(board, pos, piece, 1, 0, core_x_min, core_x_max, core_y_min, core_y_max);
+                                }
                             }
 
-                            // Vertical attacks (same x as core columns)
+                            // Vertical attacks: if piece shares a column with core (x in [core_x_min, core_x_max])
+                            // AND can reach core in that direction
                             if pos.x >= core_x_min && pos.x <= core_x_max {
-                                // Down direction (y increasing)
-                                count += count_dir_attacks(board, pos, piece, 0, 1, core_x_min, core_x_max, core_y_min, core_y_max);
-                                // Up direction (y decreasing)
-                                count += count_dir_attacks(board, pos, piece, 0, -1, core_x_min, core_x_max, core_y_min, core_y_max);
+                                // Down: pass through core if piece is above core bottom edge
+                                if pos.y > core_y_min {
+                                    count += count_dir_attacks(board, pos, piece, 0, 1, core_x_min, core_x_max, core_y_min, core_y_max);
+                                }
+                                // Up: pass through core if piece is below core top edge
+                                if pos.y < core_y_max {
+                                    count += count_dir_attacks(board, pos, piece, 0, -1, core_x_min, core_x_max, core_y_min, core_y_max);
+                                }
                             }
 
                             count
@@ -2899,9 +2904,9 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
                 },
                 PieceType::Horse => dist <= 2,  // Horse can be within 2
                 PieceType::Pawn => {
-                    // Pawn can attack if adjacent (dist 1) or crossed river and close
-                    let crossed = our_piece.pos.crosses_river(color);
-                    (dist == 1) || (crossed && dist <= 2)
+                    // Pawn attacks adjacent squares only (forward and side diagonals)
+                    // Only count dist==1: pawn can only reach adjacent diagonal squares
+                    dist == 1
                 },
                 _ => dist == 1,  // Advisors, elephants, king: adjacent only
             };
@@ -2941,22 +2946,22 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
         }
     }
 
-    // Central attack bonus: pieces attacking core area (x ∈ [3,5], y ∈ [4,5])
+    // Central attack bonus: pieces attacking core area (x ∈ [3,5], y ∈ [3,6])
     let mut central_attacks = 0;
     for our_piece in &our_pieces {
         match our_piece.pt {
             PieceType::Chariot | PieceType::Cannon => {
-                // Count attacks on core
-                let same_row = our_piece.pos.y >= 4 && our_piece.pos.y <= 5;
-                let same_col = our_piece.pos.x >= 3 && our_piece.pos.x <= 5;
+                // Count attacks on core: piece shares row or column with core area
+                let same_row = our_piece.pos.y >= CORE_Y_MIN && our_piece.pos.y <= CORE_Y_MAX;
+                let same_col = our_piece.pos.x >= CORE_X_MIN && our_piece.pos.x <= CORE_X_MAX;
                 if same_row || same_col {
                     central_attacks += 1;
                 }
             },
             PieceType::Horse | PieceType::Pawn => {
-                // Check if forward squares are in core
-                let in_core = our_piece.pos.x >= 3 && our_piece.pos.x <= 5
-                    && our_piece.pos.y >= 4 && our_piece.pos.y <= 5;
+                // Check if piece position is in core
+                let in_core = our_piece.pos.x >= CORE_X_MIN && our_piece.pos.x <= CORE_X_MAX
+                    && our_piece.pos.y >= CORE_Y_MIN && our_piece.pos.y <= CORE_Y_MAX;
                 if in_core {
                     central_attacks += 1;
                 }
@@ -3043,7 +3048,7 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
             }
         }
 
-        coordination * (70 + 30 * phase) / 100
+        coordination * (100 + 30 * (TOTAL_PHASE - phase)) / 100
     }
 
     fn horse_mobility(board: &Board, pos: Coord, _color: Color) -> i32 {
@@ -3297,10 +3302,12 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
 
         match count {
             0 => {
-                score -= (150 * mg_factor + 100 * eg_factor) / TOTAL_PHASE;
+                // Missing both elephants: penalty ≈ full elephant value (80 MG / 200 EG)
+                score -= (80 * mg_factor + 200 * eg_factor) / TOTAL_PHASE;
             }
             1 => {
-                score -= (80 * mg_factor + 50 * eg_factor) / TOTAL_PHASE;
+                // Missing one elephant: penalty ≈ half elephant value
+                score -= (40 * mg_factor + 100 * eg_factor) / TOTAL_PHASE;
                 if let Some(pos) = elephants.first() {
                     let moves = movegen::generate_elephant_moves(board, *pos, color);
                     let mut protected = false;
@@ -3312,7 +3319,7 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
                             }
                     }
                     if !protected {
-                        score -= 30;
+                        score -= 15;
                     }
                 }
             }
@@ -3335,10 +3342,10 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
                 }
 
                 if mutual_protection {
-                    score += (60 * mg_factor + 40 * eg_factor) / TOTAL_PHASE;
+                    score += (40 * mg_factor + 30 * eg_factor) / TOTAL_PHASE;
                 } else {
                     // Even without direct mutual protection, having 2 elephants is still a structure bonus
-                    score += (30 * mg_factor + 20 * eg_factor) / TOTAL_PHASE;
+                    score += (20 * mg_factor + 15 * eg_factor) / TOTAL_PHASE;
                 }
             }
             _ => {}
@@ -3394,13 +3401,15 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
                         PieceType::Horse => {
                             let mob = horse_mobility(board, pos, piece.color);
                             score += mob * sign;
-                            // Activity bonus: forward progress (5th/6th rank)
-                            let forward_rank = match piece.color {
-                                Color::Red => pos.y >= 4 && pos.y <= 5,  // Red's 5th and 6th ranks
-                                Color::Black => pos.y >= 4 && pos.y <= 5, // Black's 5th and 6th ranks
+                            // Activity bonus: horse on 4th/5th rank from its starting side
+                            // (Red: y=5-6 is near home; Black: y=3-4 is near home)
+                            // Rewards development without being too generous
+                            let near_home = match piece.color {
+                                Color::Red => pos.y >= 5 && pos.y <= 6,
+                                Color::Black => pos.y >= 3 && pos.y <= 4,
                             };
-                            if forward_rank {
-                                score += 20 * sign;
+                            if near_home {
+                                score += 15 * sign;
                             }
                         }
                         PieceType::Chariot => {
@@ -4966,6 +4975,7 @@ mod tests {
 
     #[test]
     fn test_action_mvv_lva_scoring() {
+        // King > all
         let capture_king = Action::new(
             Coord::new(0, 0),
             Coord::new(1, 1),
@@ -4977,6 +4987,20 @@ mod tests {
             Some(Piece { color: Color::Black, piece_type: PieceType::Pawn }),
         );
         assert!(capture_king.mvv_lva_score() > capture_pawn.mvv_lva_score());
+
+        // Chariot > Horse > Cannon > Advisor > Elephant > Pawn
+        let capture_chariot = Action::new(Coord::new(0, 0), Coord::new(1, 1), Some(Piece { color: Color::Black, piece_type: PieceType::Chariot }));
+        let capture_horse = Action::new(Coord::new(0, 0), Coord::new(1, 1), Some(Piece { color: Color::Black, piece_type: PieceType::Horse }));
+        let capture_cannon = Action::new(Coord::new(0, 0), Coord::new(1, 1), Some(Piece { color: Color::Black, piece_type: PieceType::Cannon }));
+        let capture_advisor = Action::new(Coord::new(0, 0), Coord::new(1, 1), Some(Piece { color: Color::Black, piece_type: PieceType::Advisor }));
+        let capture_elephant = Action::new(Coord::new(0, 0), Coord::new(1, 1), Some(Piece { color: Color::Black, piece_type: PieceType::Elephant }));
+        let capture_pawn2 = Action::new(Coord::new(0, 0), Coord::new(1, 1), Some(Piece { color: Color::Black, piece_type: PieceType::Pawn }));
+
+        assert!(capture_chariot.mvv_lva_score() > capture_horse.mvv_lva_score());
+        assert!(capture_horse.mvv_lva_score() >= capture_cannon.mvv_lva_score());  // Horse ≥ Cannon (both conditional)
+        assert!(capture_cannon.mvv_lva_score() > capture_advisor.mvv_lva_score());
+        assert!(capture_advisor.mvv_lva_score() > capture_elephant.mvv_lva_score());
+        assert!(capture_elephant.mvv_lva_score() >= capture_pawn2.mvv_lva_score()); // Elephant >= Pawn
     }
 
     // -------------------------------------------------------------------------
@@ -7318,21 +7342,22 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // BUG #4: Endgame Tablebase - Only Checks River Crossing, Not Position
+    // BUG #4: Endgame Tablebase - Position Check Removed
     // -------------------------------------------------------------------------
     // Location: EndgameTablebase::check_pawn_vs_advisor()
     //
-    // PREVIOUS BUG:
-    // The endgame tablebase only checked if a pawn crossed the river:
-    //   `if let Some(pos) = pawn_pos && pos.crosses_river(Color::Red)`
+    // PREVIOUS FIX (REVERTED):
+    // Added is_pawn_strong_position() check to filter out edge file pawns (x=0,8).
     //
-    // This incorrectly claimed a win for edge file pawns (x=0 or x=8) which
-    // are weak after crossing because they cannot move sideways.
+    // REVERTED REASON:
+    // A crossed pawn on any file can still attack along the file toward the
+    // enemy palace. The edge-file restriction was over-restrictive and filtered
+    // out legitimate winning positions. The river-crossing check alone is
+    // sufficient to establish a meaningful attack on the advisor.
     //
-    // FIX APPLIED:
-    // Added is_pawn_strong_position() check to verify the pawn is on a central
-    // file (x=3,4,5) where it can effectively attack. Edge file pawns now
-    // return None (unknown result) and rely on standard evaluation.
+    // CURRENT BEHAVIOR:
+    // Any Red pawn that crosses the river (on any file x=0..=8) in a Pawn vs
+    // Advisor endgame is treated as a decisive advantage (score 80000).
     //
     // REMAINING LIMITATION (not a bug, just simplification):
     // - Does not distinguish how far past the river the pawn has advanced

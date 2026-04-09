@@ -36,7 +36,12 @@
       "Bash(git -C .claude/worktrees/book-tablebase-fixes status)",
       "Bash(git -C .claude/worktrees/book-tablebase-fixes log --oneline -3)",
       "Bash(git checkout:*)",
-      "Bash(git worktree:*)"
+      "Bash(git worktree:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(gh search:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "mcp__plugin_context7_context7__resolve-library-id"
     ]
   }
 }
