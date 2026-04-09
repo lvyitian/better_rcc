@@ -3023,6 +3023,38 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
                                 }
                             }
                         }
+
+                        // Advancement bonus: reward pushing pawns forward
+                        let crossed = pos.crosses_river(color);
+                        let advancement_bonus = if crossed {
+                            // Crossed river — check for back rank threat or further progress
+                            match color {
+                                Color::Red => {
+                                    if pos.y == 0 { 80 }  // Red pawn on Black's back rank (threat to promote)
+                                    else if pos.y <= 3 { 5 }  // Crossed but not further advanced
+                                    else { 0 }
+                                },
+                                Color::Black => {
+                                    if pos.y == 9 { 80 }  // Black pawn on Red's back rank
+                                    else if pos.y >= 6 { 5 }  // Crossed but not further advanced
+                                    else { 0 }
+                                }
+                            }
+                        } else {
+                            0
+                        };
+                        score += advancement_bonus;
+
+                        // Central file bonus: pawn on file 4 or 5 (columns 4-5) gets bonus per rank advanced
+                        if pos.x == 4 || pos.x == 5 {
+                            let ranks_from_origin: i32 = match color {
+                                Color::Red => (6 - pos.y) as i32,  // Red starts at y=6, higher = more advanced
+                                Color::Black => (pos.y - 3) as i32,  // Black starts at y=3
+                            };
+                            if ranks_from_origin > 0 {
+                                score += ranks_from_origin * 10;
+                            }
+                        }
                     }
             }
         }
