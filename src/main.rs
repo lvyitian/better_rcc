@@ -2945,6 +2945,32 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
             }
         }
 
+        // 2. Attack pressure near enemy king — our pieces near their king
+        let enemy_king_pos = match color {
+            Color::Red => bk,
+            Color::Black => rk,
+        };
+
+        if let Some(ek) = enemy_king_pos {
+            for y in 0..10 {
+                for x in 0..9 {
+                    let our_pos = Coord::new(x as i8, y as i8);
+                    if let Some(p) = board.get(our_pos) && p.color == color {
+                        let dist = our_pos.distance_to(ek);
+                        if dist <= 2 {
+                            let pressure = match p.piece_type {
+                                PieceType::Chariot | PieceType::Cannon => 15,
+                                PieceType::Horse => 10,
+                                PieceType::Pawn if our_pos.crosses_river(color) => 5,
+                                _ => 0,
+                            };
+                            safety += pressure;
+                        }
+                    }
+                }
+            }
+        }
+
         Some(safety * color.sign())
     }
 
