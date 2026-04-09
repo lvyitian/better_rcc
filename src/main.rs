@@ -2945,7 +2945,7 @@ pub mod eval {
                         }
                         PieceType::Chariot => {
                             let mob = chariot_mobility(board, pos, piece.color);
-                            score += mob * sign;
+                            score += mob * sign * 5;
                         }
                         PieceType::Cannon => {
                             let sup = cannon_support(board, pos, piece.color);
