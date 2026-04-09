@@ -3104,19 +3104,26 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
             2 => {
                 let pos1 = elephants[0];
                 let pos2 = elephants[1];
+
+                // Generate moves for both elephants
                 let moves1 = movegen::generate_elephant_moves(board, pos1, color);
                 let moves2 = movegen::generate_elephant_moves(board, pos2, color);
 
-                let mut linked = false;
+                // Check mutual protection: they share defensive positions
+                // Each elephant can move to squares the other can reach
+                let mut mutual_protection = false;
                 for m1 in &moves1 {
                     if moves2.contains(m1) {
-                        linked = true;
+                        mutual_protection = true;
                         break;
                     }
                 }
 
-                if linked {
+                if mutual_protection {
                     score += (60 * mg_factor + 40 * eg_factor) / TOTAL_PHASE;
+                } else {
+                    // Even without direct mutual protection, having 2 elephants is still a structure bonus
+                    score += (30 * mg_factor + 20 * eg_factor) / TOTAL_PHASE;
                 }
             }
             _ => {}
