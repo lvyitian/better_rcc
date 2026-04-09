@@ -3538,7 +3538,7 @@ pub mod search {
         }
 
         if depth >= QS_MAX_DEPTH {
-            return evaluate(board, side, false);
+            return evaluate(board, side, thread_ctx.last_move_aggressive);
         }
 
         if let Some(winner) = board.is_repetition_violation() {
@@ -3558,7 +3558,7 @@ pub mod search {
                 }
             }
 
-        let stand_pat = evaluate(board, side, false);
+        let stand_pat = evaluate(board, side, thread_ctx.last_move_aggressive);
         if stand_pat >= beta {
             return beta;
         }
@@ -3589,6 +3589,9 @@ pub mod search {
             }
 
             board.make_move(action);
+            let was_aggressive = action.captured.is_some();
+            thread_ctx.last_move_aggressive = was_aggressive;
+
             let eval = -quiescence(
                 board, thread_ctx, shared_tt, -beta, -alpha,
                 side.opponent(), depth + 1, time_ctx
@@ -3689,7 +3692,7 @@ pub mod search {
 
         // Futility pruning: if static eval is well above alpha at low depths, skip searching
         if !pv_node && !is_in_check && depth <= 3 {
-            let static_eval = evaluate(board, side, false);
+            let static_eval = evaluate(board, side, thread_ctx.last_move_aggressive);
             let futility_margin = FUTILITY_MARGIN * depth as i32;
             if static_eval + futility_margin <= alpha {
                 return static_eval;
@@ -3713,7 +3716,7 @@ pub mod search {
         // Null move pruning: try skipping a move to prove the position is strong
         // Must recompute is_endgame since board state may have changed during IID
         if !pv_node && !is_in_check && depth > NULL_MOVE_REDUCTION {
-            let eval_for_null = evaluate(board, side, false);
+            let eval_for_null = evaluate(board, side, thread_ctx.last_move_aggressive);
             let null_is_endgame = eval_for_null.abs() < ENDGAME_THRESHOLD;
             if !null_is_endgame {
                 let zobrist = get_zobrist();
@@ -3737,7 +3740,7 @@ pub mod search {
 
         // Second futility check after IID and null move pruning (position may have changed)
         // Must recompute eval since IID and null move search changed board state
-        let current_eval = evaluate(board, side, false);
+        let current_eval = evaluate(board, side, thread_ctx.last_move_aggressive);
         if !pv_node && !is_in_check && depth <= 3 {
             let futility_margin = FUTILITY_MARGIN * depth as i32;
             if current_eval + futility_margin <= alpha {
@@ -3771,6 +3774,10 @@ pub mod search {
             let new_depth = depth - 1 + extension;
 
             board.make_move(*action);
+
+            // Track initiative: aggressive if capture or check
+            let was_aggressive = action.captured.is_some() || action.is_check;
+            thread_ctx.last_move_aggressive = was_aggressive;
 
             // History pruning: skip late moves with poor history at high depths
             let history_score = thread_ctx.history_table[zobrist.pos_idx(action.src)][zobrist.pos_idx(action.tar)];
