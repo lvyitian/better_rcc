@@ -2675,7 +2675,9 @@ pub mod eval {
         coordination as i32 * (70 + 30 * phase) / 100
     }
 
-    fn horse_mobility(board: &Board, pos: Coord, color: Color) -> i32 {
+    fn horse_mobility(board: &Board, pos: Coord, _color: Color) -> i32 {
+        // Horse mobility: number of valid jumps × 10
+        // A valid jump has empty horse-head position and can land anywhere (enemy or empty)
         let mut mobility = 0;
 
         for i in 0..8 {
@@ -2684,15 +2686,13 @@ pub mod eval {
             let tar = Coord::new(pos.x + dx, pos.y + dy);
             let block = Coord::new(pos.x + bx, pos.y + by);
 
+            // Valid jump: target is on board AND horse head is empty
             if tar.is_valid() && board.get(block).is_none() {
                 mobility += 1;
-                if let Some(p) = board.get(tar)
-                    && p.color != color {
-                        mobility += 5;
-                    }
             }
         }
-        mobility
+
+        mobility * 10
     }
 
     fn cannon_support(board: &Board, pos: Coord, color: Color) -> i32 {
@@ -2766,7 +2766,8 @@ pub mod eval {
         Some(safety * color.sign())
     }
 
-    fn chariot_mobility(board: &Board, pos: Coord, color: Color) -> i32 {
+    fn chariot_mobility(board: &Board, pos: Coord, _color: Color) -> i32 {
+        // Chariot mobility: empty squares in open lines × 5
         let mut score = 0;
 
         for (dx, dy) in DIRS_4 {
@@ -2776,12 +2777,9 @@ pub mod eval {
             while (0..BOARD_WIDTH).contains(&x) && (0..BOARD_HEIGHT).contains(&y) {
                 let tar = Coord::new(x, y);
                 if board.get(tar).is_some() {
-                    if board.get(tar).unwrap().color != color {
-                        score += 5;
-                    }
-                    break;
+                    break; // Blocked, no score for this direction
                 }
-                score += 10;
+                score += 5; // Each empty square is worth 5
                 x += dx;
                 y += dy;
             }
@@ -2793,11 +2791,33 @@ pub mod eval {
         let mut score = 0;
         let eg_factor = TOTAL_PHASE - phase;
 
+        // Count pawns per file for doubled pawn detection
+        let mut pawns_per_file = [0i32; 9];
+
         for y in 0..10 {
             for x in 0..9 {
                 let pos = Coord::new(x as i8, y as i8);
                 if let Some(p) = board.get(pos)
                     && p.color == color && p.piece_type == PieceType::Pawn {
+                        pawns_per_file[x] += 1;
+
+                        // Doubled pawn penalty: -30 per pawn on a file with 2+ pawns
+                        // Only penalize once per file (the second pawn and beyond)
+                        if pawns_per_file[x] >= 2 {
+                            score -= 30;
+                        }
+
+                        // Back-rank pawn penalty: -20 (not crossed river)
+                        // Red: y=6 (starting row is 7, not crossed if y > 4)
+                        // Black: y=3 (starting row is 2, not crossed if y < 5)
+                        let not_crossed = match color {
+                            Color::Red => y == 6,    // Red's back rank before river
+                            Color::Black => y == 3,  // Black's back rank before river
+                        };
+                        if not_crossed {
+                            score -= 20;
+                        }
+
                         let left = Coord::new(pos.x - 1, pos.y);
                         let right = Coord::new(pos.x + 1, pos.y);
                         let mut linked = 0;

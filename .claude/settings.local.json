@@ -3,7 +3,29 @@
     "allow": [
       "Bash(cargo build:*)",
       "Bash(cargo test:*)",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "Bash(cargo check:*)",
+      "Bash(xxd)",
+      "Read(//f/RustroverProjects/better_rust_chinese_chess/**)",
+      "Bash(sed -n '4768p' src/main.rs)",
+      "Bash(xxd src/main.rs)",
+      "Bash(grep -v \"C:\\\\\\\\Users\")",
+      "Bash(cargo search:*)",
+      "Bash(cargo info:*)",
+      "Bash(cargo update:*)",
+      "Bash(cargo clean:*)",
+      "Bash(RUSTFLAGS=\"-Zuse-new-compiler-rt=off\" cargo build)",
+      "Bash(rustup show:*)",
+      "Bash(cargo +stable build)",
+      "Bash(grep -B1 \"///\")",
+      "Bash(grep -B1 \"^    ///\")",
+      "Bash(grep -A1 \"^    ///\")",
+      "Bash(grep -n \"///\" src/main.rs)",
+      "Bash(grep \"///\")",
+      "Bash(python3 -c ':*)",
+      "Bash(cargo run:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)"
     ]
   }
 }
