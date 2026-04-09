@@ -106,15 +106,6 @@ pub const MAX_TOTAL_EXTENSION: u8 = 3;
 /// Each entry is ~16 bytes, so ~500MB total
 pub const TT_SIZE: usize = 1 << 25;
 
-/// When material is below this, position is considered "endgame"
-/// At full material: ~6600 (King=10000, Chariot=650, Horse/Cannon=350, etc.)
-/// Endgame begins when ~2500 material remains (~4 chariots per side)
-pub const ENDGAME_THRESHOLD: i32 = 2500;
-
-/// Threshold for midgame evaluation (not currently used for phase calculation)
-/// Higher than ENDGAME_THRESHOLD to define the transition phase
-pub const MIDGAME_THRESHOLD: i32 = 5000;
-
 /// Number of repeated positions before declaring a repetition violation
 pub const REPETITION_VIOLATION_COUNT: u8 = 3;
 
@@ -126,6 +117,18 @@ pub const TIME_BUFFER_MS: u64 = 1000;
 
 /// Null move pruning depth reduction (R in literature)
 pub const NULL_MOVE_REDUCTION: u8 = 2;
+
+/// Phase threshold below which a position is considered "endgame" for search pruning.
+/// TOTAL_PHASE is 82 (41 per side). At phase < 40, most pieces have been exchanged —
+/// roughly 5+ pieces per side gone, leaving the kings more exposed and mobility high.
+/// Used to guide history pruning and null move pruning decisions.
+pub const ENDGAME_PHASE_THRESHOLD: i32 = 40;
+
+/// Phase threshold above which a position is considered "midgame" for search pruning.
+/// TOTAL_PHASE is 82 (41 per side). At phase > 60, both sides have most pieces on board —
+/// full material opening/middlegame with complex tactical possibilities.
+/// Currently unused but available for future phase-gated features (e.g., futility margins).
+pub const MIDGAME_PHASE_THRESHOLD: i32 = 60;
 
 /// Minimum moves before applying Late Move Reductions (LMR)
 pub const LMR_MIN_MOVES: usize = 4;
@@ -607,7 +610,7 @@ pub mod book {
 
         /// Initialize all opening lines
         fn init_all_openings(&mut self) {
-            let mut board = Board::new(RuleSet::Official, 1);
+            let board = Board::new(RuleSet::Official, 1);
             let root_key = board.zobrist_key;
 
             // Collect unique first moves BEFORE any board mutation.
@@ -2500,7 +2503,7 @@ pub mod eval {
     const TOTAL_PHASE: i32 = 82; // 41 per side × 2 sides
 
     #[inline(always)]
-    fn game_phase(board: &Board) -> i32 {
+    pub(crate) fn game_phase(board: &Board) -> i32 {
         let mut phase = 0;
         for y in 0..10 {
             for x in 0..9 {
@@ -3354,7 +3357,7 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
             if let Some((tb_score, conf)) = EndgameTablebase::probe(board, side) {
                 if conf < 0.2 { return tb_score; }
                 let weight = conf.max(0.3);
-                return ((tb_score as f32 * weight + fallback as f32 * (1.0 - weight)) as i32);
+                return (tb_score as f32 * weight + fallback as f32 * (1.0 - weight)) as i32;
             }
             return fallback;
         }
@@ -3363,7 +3366,7 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
             if let Some((tb_score, conf)) = EndgameTablebase::probe(board, side) {
                 if conf < 0.2 { return tb_score; }
                 let weight = conf.max(0.3);
-                return ((tb_score as f32 * weight + fallback as f32 * (1.0 - weight)) as i32);
+                return (tb_score as f32 * weight + fallback as f32 * (1.0 - weight)) as i32;
             }
             return fallback;
         }
@@ -3489,7 +3492,7 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
         if let Some((tb_score, conf)) = EndgameTablebase::probe(board, side) {
             if conf < 0.2 { return tb_score; }
             let weight = conf.max(0.3);
-            return ((tb_score as f32 * weight + regular_score as f32 * (1.0 - weight)) as i32);
+            return (tb_score as f32 * weight + regular_score as f32 * (1.0 - weight)) as i32;
         }
 
         regular_score
@@ -3509,10 +3512,11 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
 // - Futility Pruning near leaf nodes
 
 pub mod search {
-    use super::*;
-    use eval::evaluate;
-    use movegen::*;
-    use super::book::OpeningBook;
+        use super::*;
+        use eval::evaluate;
+        use eval::game_phase;
+        use movegen::*;
+        use super::book::OpeningBook;
 
     // -------------------------------------------------------------------------
     // Thread-Safe Data Structures
@@ -3922,8 +3926,7 @@ pub mod search {
         // Null move pruning: try skipping a move to prove the position is strong
         // Must recompute is_endgame since board state may have changed during IID
         if !pv_node && !is_in_check && depth > NULL_MOVE_REDUCTION {
-            let eval_for_null = evaluate(board, side, thread_ctx.last_move_aggressive);
-            let null_is_endgame = eval_for_null.abs() < ENDGAME_THRESHOLD;
+            let null_is_endgame = game_phase(board) < ENDGAME_PHASE_THRESHOLD;
             if !null_is_endgame {
                 let zobrist = get_zobrist();
                 board.zobrist_key ^= zobrist.side;
@@ -3987,7 +3990,7 @@ pub mod search {
 
             // History pruning: skip late moves with poor history at high depths
             let history_score = thread_ctx.history_table[zobrist.pos_idx(action.src)][zobrist.pos_idx(action.tar)];
-            let is_endgame = current_eval.abs() < ENDGAME_THRESHOLD;
+            let is_endgame = game_phase(board) < ENDGAME_PHASE_THRESHOLD;
             let skip_move = depth > 6
                 && move_idx >= 8
                 && !gives_check
