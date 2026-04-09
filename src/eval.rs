@@ -1,6 +1,5 @@
 // Public items re-exported from eval submodule for use by other modules
 pub use eval::handcrafted_evaluate;
-pub use eval::game_phase;
 
 // Re-export types needed by nn_eval (these are pub in main.rs)
 pub use crate::{

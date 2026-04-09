@@ -3,7 +3,6 @@
 
 use crate::{Board, Color};
 use crate::eval::handcrafted_evaluate;
-use crate::eval::game_phase;
 
 pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) -> i32 {
     // For now, just call the handcrafted evaluation
