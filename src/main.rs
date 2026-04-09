@@ -2594,6 +2594,193 @@ pub mod eval {
         }
     }
 
+/// Evaluate attack rewards: hanging pieces, overload, central attacks, king attacks
+/// Motivates aggressive play by rewarding actual threats
+fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
+    let mut score = 0;
+    let mg_factor = phase;
+    let eg_factor = TOTAL_PHASE - phase;
+
+    let enemy = color.opponent();
+
+    // Collect our piece positions and their attack targets
+    #[derive(Clone)]
+    struct PieceInfo {
+        pos: Coord,
+        pt: PieceType,
+    }
+    let mut our_pieces: SmallVec::<[PieceInfo; 16]> = SmallVec::new();
+    let mut enemy_pieces: SmallVec::<[PieceInfo; 16]> = SmallVec::new();
+    for y in 0..10 {
+        for x in 0..9 {
+            let pos = Coord::new(x as i8, y as i8);
+            if let Some(p) = board.get(pos) {
+                if p.color == color {
+                    our_pieces.push(PieceInfo { pos, pt: p.piece_type });
+                } else {
+                    enemy_pieces.push(PieceInfo { pos, pt: p.piece_type });
+                }
+            }
+        }
+    }
+
+    // For each enemy piece, count how many attacks and defenses it has
+    for (idx, enemy_piece) in enemy_pieces.iter().enumerate() {
+        let mut attacked_by_us = 0;
+        let mut defended_by_them = 0;
+
+        for our_piece in &our_pieces {
+            // Check if we can attack enemy_piece's position
+            // Simple check: can any of our pieces "see" this square?
+            // For sliding pieces (chariot/cannon), need clear line of sight
+            // For non-sliding, just check distance
+            let dist = our_piece.pos.distance_to(enemy_piece.pos);
+
+            let can_attack = match our_piece.pt {
+                PieceType::Chariot => {
+                    // Chariot can attack if on same row/col with clear path
+                    let same_row = our_piece.pos.y == enemy_piece.pos.y;
+                    let same_col = our_piece.pos.x == enemy_piece.pos.x;
+                    if same_row || same_col {
+                        // Check path is clear
+                        let (start, end) = if same_row {
+                            let x_min = our_piece.pos.x.min(enemy_piece.pos.x);
+                            let x_max = our_piece.pos.x.max(enemy_piece.pos.x);
+                            (x_min + 1, x_max - 1)
+                        } else {
+                            let y_min = our_piece.pos.y.min(enemy_piece.pos.y);
+                            let y_max = our_piece.pos.y.max(enemy_piece.pos.y);
+                            (y_min + 1, y_max - 1)
+                        };
+                        let mut clear = true;
+                        // Simple path check - just ensure empty between
+                        // For same row: check x between
+                        // For same col: check y between
+                        if same_row {
+                            for check_x in start..=end {
+                                let c = Coord::new(check_x, our_piece.pos.y);
+                                if board.get(c).is_some() && c != enemy_piece.pos {
+                                    clear = false;
+                                    break;
+                                }
+                            }
+                        } else {
+                            for check_y in start..=end {
+                                let c = Coord::new(our_piece.pos.x, check_y);
+                                if board.get(c).is_some() && c != enemy_piece.pos {
+                                    clear = false;
+                                    break;
+                                }
+                            }
+                        }
+                        clear
+                    } else {
+                        false
+                    }
+                },
+                PieceType::Cannon => {
+                    // Cannon needs exactly 1 screen between
+                    let same_row = our_piece.pos.y == enemy_piece.pos.y;
+                    let same_col = our_piece.pos.x == enemy_piece.pos.x;
+                    if same_row || same_col {
+                        let mut screen_count = 0;
+                        if same_row {
+                            let x_min = our_piece.pos.x.min(enemy_piece.pos.x);
+                            let x_max = our_piece.pos.x.max(enemy_piece.pos.x);
+                            for check_x in (x_min+1)..(x_max) {
+                                let c = Coord::new(check_x, our_piece.pos.y);
+                                if board.get(c).is_some() && c != enemy_piece.pos {
+                                    screen_count += 1;
+                                }
+                            }
+                        } else {
+                            let y_min = our_piece.pos.y.min(enemy_piece.pos.y);
+                            let y_max = our_piece.pos.y.max(enemy_piece.pos.y);
+                            for check_y in (y_min+1)..(y_max) {
+                                let c = Coord::new(our_piece.pos.x, check_y);
+                                if board.get(c).is_some() && c != enemy_piece.pos {
+                                    screen_count += 1;
+                                }
+                            }
+                        }
+                        screen_count == 1
+                    } else {
+                        false
+                    }
+                },
+                PieceType::Horse => dist <= 2,  // Horse can be within 2
+                PieceType::Pawn => {
+                    // Pawn can attack if adjacent (dist 1) or crossed river and close
+                    let crossed = our_piece.pos.crosses_river(color);
+                    (dist == 1) || (crossed && dist <= 2)
+                },
+                _ => dist == 1,  // Advisors, elephants, king: adjacent only
+            };
+
+            if can_attack {
+                attacked_by_us += 1;
+            }
+        }
+
+        // Count their defenders (excluding the piece itself)
+        for (def_idx, their_piece) in enemy_pieces.iter().enumerate() {
+            if def_idx == idx { continue; }  // Don't count self-defense
+            let dist = their_piece.pos.distance_to(enemy_piece.pos);
+            let can_defend = match their_piece.pt {
+                PieceType::Chariot | PieceType::Cannon => {
+                    // Same line check as attack
+                    let same_row = their_piece.pos.y == enemy_piece.pos.y;
+                    let same_col = their_piece.pos.x == enemy_piece.pos.x;
+                    same_row || same_col
+                },
+                PieceType::Horse => dist <= 2,
+                PieceType::Pawn => dist == 1,
+                _ => dist == 1,
+            };
+            if can_defend {
+                defended_by_them += 1;
+            }
+        }
+
+        // Hanging piece: attacked with no defense, or attacked with 1 defense but we're attacking with multiple
+        if attacked_by_us > 0 && defended_by_them == 0 {
+            let val = (30 * mg_factor + 20 * eg_factor) / TOTAL_PHASE;
+            score += val;
+        } else if attacked_by_us > 1 && defended_by_them == 1 {
+            let val = (30 * mg_factor + 20 * eg_factor) / TOTAL_PHASE;
+            score += val / 2;  // Partial bonus for overloaded defender
+        }
+    }
+
+    // Central attack bonus: pieces attacking core area (x ∈ [3,5], y ∈ [4,5])
+    let mut central_attacks = 0;
+    for our_piece in &our_pieces {
+        match our_piece.pt {
+            PieceType::Chariot | PieceType::Cannon => {
+                // Count attacks on core
+                let same_row = our_piece.pos.y >= 4 && our_piece.pos.y <= 5;
+                let same_col = our_piece.pos.x >= 3 && our_piece.pos.x <= 5;
+                if same_row || same_col {
+                    central_attacks += 1;
+                }
+            },
+            PieceType::Horse | PieceType::Pawn => {
+                // Check if forward squares are in core
+                let in_core = our_piece.pos.x >= 3 && our_piece.pos.x <= 5
+                    && our_piece.pos.y >= 4 && our_piece.pos.y <= 5;
+                if in_core {
+                    central_attacks += 1;
+                }
+            },
+            _ => {}
+        }
+    }
+    let central_bonus = (central_attacks as i32) * (10 * mg_factor + 5 * eg_factor) / TOTAL_PHASE;
+    score += central_bonus;
+
+    score * color.sign()
+}
+
     fn piece_coordination(board: &Board, color: Color, phase: i32) -> i32 {
         let mut coordination = 0;
         let (_rk, _bk) = board.find_kings();
@@ -3002,6 +3189,10 @@ pub mod eval {
 
         score += elephant_structure(board, Color::Red, phase);
         score += elephant_structure(board, Color::Black, phase);
+
+        // Attack rewards
+        score += attack_rewards(board, Color::Red, phase);
+        score += attack_rewards(board, Color::Black, phase);
 
         if board.is_check(Color::Black) {
             score += CHECK_BONUS;
