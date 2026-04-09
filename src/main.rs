@@ -2647,51 +2647,29 @@ pub mod eval {
             coordination += 50 * color.sign();
         }
 
+        // Cannon platform detection: simplified direct position checks
+        // A cannon gains value when it has advisor, elephant, or pawn pieces nearby as screens
         for (piece, pos) in &our_pieces {
             if piece.piece_type == PieceType::Cannon {
+                let mut platform_count = 0;
                 for (dx, dy) in DIRS_4 {
-                    let mut x = pos.x + dx;
-                    let mut y = pos.y + dy;
-                    let mut platform_found = false;
-
-                    while (0..BOARD_WIDTH).contains(&x) && (0..BOARD_HEIGHT).contains(&y) {
-                        let tar = Coord::new(x, y);
+                    let tar = Coord::new(pos.x + dx, pos.y + dy);
+                    if tar.is_valid() {
                         if let Some(p) = board.get(tar) {
-                            if !platform_found {
-                                if p.piece_type == PieceType::Advisor || p.piece_type == PieceType::Elephant || p.piece_type == PieceType::Pawn {
-                                    if p.color == color {
-                                        // Our piece as platform: positive
-                                        coordination += 20 * color.sign();
-                                    } else {
-                                        // Enemy piece as platform: negative (dangerous)
-                                        coordination -= 15 * color.sign();
-                                    }
-                                }
-                                platform_found = true;
-                            } else {
-                                break;
+                            // Advisor, Elephant, or Pawn can serve as cannon platforms
+                            if p.piece_type == PieceType::Advisor
+                                || p.piece_type == PieceType::Elephant
+                                || p.piece_type == PieceType::Pawn {
+                                platform_count += 1;
                             }
                         }
-                        x += dx;
-                        y += dy;
                     }
                 }
-            }
-        }
-
-        if our_pieces.len() >= 4 {
-            let mut total_dist = 0;
-            let mut count = 0;
-            for i in 0..our_pieces.len() {
-                for j in i+1..our_pieces.len() {
-                    total_dist += our_pieces[i].1.distance_to(our_pieces[j].1);
-                    count += 1;
+                // Bonus for each platform piece found (cap at 2 per direction)
+                if platform_count > 0 {
+                    coordination += platform_count as i32 * 10 * color.sign();
                 }
             }
-            let avg_dist = if count > 0 { total_dist / count } else { 0 };
-            let optimal_dist = 6 + (our_pieces.len() as i32 / 2);
-            let dist_penalty = (avg_dist - optimal_dist).abs();
-            coordination -= dist_penalty * 2 * color.sign();
         }
 
         coordination as i32 * (70 + 30 * phase) / 100
