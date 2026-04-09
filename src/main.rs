@@ -160,7 +160,7 @@ pub const MATE_SCORE: i32 = 100000;
 
 /// Bonus added to evaluation when a side is in check
 /// Encourages the engine to seek checks in the search
-pub const CHECK_BONUS: i32 = 50;
+pub const CHECK_BONUS: i32 = 250;
 
 // =============================================================================
 // RULE SETS
