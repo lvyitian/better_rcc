@@ -3158,7 +3158,7 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
         score * color.sign()
     }
 
-    pub fn evaluate(board: &Board, side: Color) -> i32 {
+    pub fn evaluate(board: &Board, side: Color, initiative: bool) -> i32 {
         if let Some(score) = EndgameTablebase::probe(board, side) {
             return score;
         }
@@ -3282,6 +3282,10 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
             score -= CHECK_BONUS;
         }
 
+        if initiative {
+            score += 20 * side.sign();
+        }
+
         score * side.sign()
     }
 }
@@ -3385,6 +3389,7 @@ pub mod search {
         pub history_table: [[i32; 90]; 90],
         pub killer_moves: [[Option<Action>; 2]; (MAX_DEPTH + 4) as usize],
         pub counter_moves: [[Option<Action>; 90]; 90],
+        pub last_move_aggressive: bool,
     }
 
     impl Default for ThreadContext {
@@ -3399,6 +3404,7 @@ pub mod search {
                 history_table: [[0; 90]; 90],
                 killer_moves: [[None; 2]; (MAX_DEPTH + 4) as usize],
                 counter_moves: [[None; 90]; 90],
+                last_move_aggressive: false,
             }
         }
 
@@ -3532,7 +3538,7 @@ pub mod search {
         }
 
         if depth >= QS_MAX_DEPTH {
-            return evaluate(board, side);
+            return evaluate(board, side, false);
         }
 
         if let Some(winner) = board.is_repetition_violation() {
@@ -3552,7 +3558,7 @@ pub mod search {
                 }
             }
 
-        let stand_pat = evaluate(board, side);
+        let stand_pat = evaluate(board, side, false);
         if stand_pat >= beta {
             return beta;
         }
@@ -3683,7 +3689,7 @@ pub mod search {
 
         // Futility pruning: if static eval is well above alpha at low depths, skip searching
         if !pv_node && !is_in_check && depth <= 3 {
-            let static_eval = evaluate(board, side);
+            let static_eval = evaluate(board, side, false);
             let futility_margin = FUTILITY_MARGIN * depth as i32;
             if static_eval + futility_margin <= alpha {
                 return static_eval;
@@ -3707,7 +3713,7 @@ pub mod search {
         // Null move pruning: try skipping a move to prove the position is strong
         // Must recompute is_endgame since board state may have changed during IID
         if !pv_node && !is_in_check && depth > NULL_MOVE_REDUCTION {
-            let eval_for_null = evaluate(board, side);
+            let eval_for_null = evaluate(board, side, false);
             let null_is_endgame = eval_for_null.abs() < ENDGAME_THRESHOLD;
             if !null_is_endgame {
                 let zobrist = get_zobrist();
@@ -3731,7 +3737,7 @@ pub mod search {
 
         // Second futility check after IID and null move pruning (position may have changed)
         // Must recompute eval since IID and null move search changed board state
-        let current_eval = evaluate(board, side);
+        let current_eval = evaluate(board, side, false);
         if !pv_node && !is_in_check && depth <= 3 {
             let futility_margin = FUTILITY_MARGIN * depth as i32;
             if current_eval + futility_margin <= alpha {
@@ -5242,8 +5248,8 @@ mod tests {
     #[test]
     fn fuzz_evaluate_no_panic_initial_position() {
         let board = Board::new(RuleSet::Official, 1);
-        let _ = eval::evaluate(&board, Color::Red);
-        let _ = eval::evaluate(&board, Color::Black);
+        let _ = eval::evaluate(&board, Color::Red, false);
+        let _ = eval::evaluate(&board, Color::Black, false);
     }
 
     #[test]
@@ -5276,7 +5282,7 @@ mod tests {
             board.make_move(chosen);
 
             // Evaluate position - should not panic
-            let _ = eval::evaluate(&board, side);
+            let _ = eval::evaluate(&board, side, false);
         }
     }
 
@@ -7729,8 +7735,8 @@ mod tests {
     #[test]
     fn test_eval_returns_reasonable_values() {
         let board = Board::new(RuleSet::Official, 1);
-        let red_eval = eval::evaluate(&board, Color::Red);
-        let black_eval = eval::evaluate(&board, Color::Black);
+        let red_eval = eval::evaluate(&board, Color::Red, false);
+        let black_eval = eval::evaluate(&board, Color::Black, false);
         // Red evaluates positive, Black evaluates negative (proper sign convention)
         assert!(red_eval > 0, "Red should have positive evaluation: {}", red_eval);
         assert!(black_eval < 0, "Black should have negative evaluation: {}", black_eval);
@@ -7744,8 +7750,8 @@ mod tests {
         let mut board = Board::new(RuleSet::Official, 1);
         // Make a symmetric position
         board.current_side = Color::Red;
-        let red_eval = eval::evaluate(&board, Color::Red);
-        let black_eval = eval::evaluate(&board, Color::Black);
+        let red_eval = eval::evaluate(&board, Color::Red, false);
+        let black_eval = eval::evaluate(&board, Color::Black, false);
         assert_eq!(red_eval, -black_eval,
             " evaluations should be negated: Red={}, Black={}", red_eval, black_eval);
     }
@@ -7758,7 +7764,7 @@ mod tests {
             (4, 1, Color::Red, PieceType::Chariot), // Red chariot checking Black king
         ]);
         // Black is in check, verify evaluation doesn't panic
-        let _ = eval::evaluate(&board, Color::Black);
+        let _ = eval::evaluate(&board, Color::Black, false);
     }
 
     // -------------------------------------------------------------------------
@@ -7934,14 +7940,14 @@ mod tests {
             (4, 4, Color::Red, PieceType::Chariot),
             (4, 0, Color::Black, PieceType::King),
         ]);
-        let chariot_eval = eval::evaluate(&board_chariot, Color::Red);
+        let chariot_eval = eval::evaluate(&board_chariot, Color::Red, false);
 
         let board_horse = make_board(vec![
             (4, 9, Color::Red, PieceType::King),
             (4, 4, Color::Red, PieceType::Horse),
             (4, 0, Color::Black, PieceType::King),
         ]);
-        let horse_eval = eval::evaluate(&board_horse, Color::Red);
+        let horse_eval = eval::evaluate(&board_horse, Color::Red, false);
 
         // Chariot (650) + PST should be > Horse (350) + PST
         assert!(chariot_eval > horse_eval,
@@ -7999,7 +8005,7 @@ mod tests {
             assert!(rk.is_some() || bk.is_some(), "At least one king must remain");
 
             // Evaluate should not panic
-            let _ = eval::evaluate(&board, side);
+            let _ = eval::evaluate(&board, side, false);
         }
     }
 
