@@ -313,7 +313,7 @@ impl Coord {
     /// Core area for chariot support: x=3-5, and y is relative to color.
     /// - Red: y=3-6 (stayed behind river, supporting role)
     /// - Black: y=3-6 (mirrored, but conceptually Black's "home" side)
-    /// A chariot in core area is positioned to support an attack or defend centrally.
+    ///   A chariot in core area is positioned to support an attack or defend centrally.
     #[inline(always)]
     pub fn in_core_area(self, color: Color) -> bool {
         let x_ok = self.x >= CORE_X_MIN && self.x <= CORE_X_MAX;
@@ -2432,7 +2432,7 @@ pub mod eval {
                                 let target_y = pos.y + t_dy;
 
                                 let head = Coord::new(head_x, head_y);
-                                if !head.is_valid() || !board.get(head).is_none() {
+                                if !head.is_valid() || board.get(head).is_some() {
                                     continue; // Horse head must be empty
                                 }
 
@@ -2502,6 +2502,7 @@ pub mod eval {
     /// Returns 1 if the piece can attack the core area in this direction, 0 otherwise.
     /// For chariot: attacks if path to core is clear (no pieces before target).
     /// For cannon: attacks if exactly 1 screen before empty target, or 0 screens before enemy target.
+    #[allow(clippy::too_many_arguments)]
     fn count_dir_attacks(
         board: &Board,
         pos: Coord,
@@ -2587,12 +2588,8 @@ pub mod eval {
         // Chariot: clear path (screen_count == 0) attacks empty
         // Cannon: exactly 1 screen attacks empty
         match piece.piece_type {
-            PieceType::Chariot => {
-                if screen_count == 0 { 1 } else { 0 }
-            },
-            PieceType::Cannon => {
-                if screen_count == 1 { 1 } else { 0 }
-            },
+            PieceType::Chariot if screen_count == 0 => 1,
+            PieceType::Cannon if screen_count == 1 => 1,
             _ => 0,
         }
     }
@@ -2654,25 +2651,23 @@ pub mod eval {
                 let mut platform_count = 0;
                 for (dx, dy) in DIRS_4 {
                     let tar = Coord::new(pos.x + dx, pos.y + dy);
-                    if tar.is_valid() {
-                        if let Some(p) = board.get(tar) {
-                            // Advisor, Elephant, or Pawn can serve as cannon platforms
-                            if p.piece_type == PieceType::Advisor
-                                || p.piece_type == PieceType::Elephant
-                                || p.piece_type == PieceType::Pawn {
-                                platform_count += 1;
-                            }
-                        }
+                    if tar.is_valid()
+                        && let Some(p) = board.get(tar)
+                        && (p.piece_type == PieceType::Advisor
+                            || p.piece_type == PieceType::Elephant
+                            || p.piece_type == PieceType::Pawn)
+                    {
+                        platform_count += 1;
                     }
                 }
                 // Bonus for each platform piece found (cap at 2 per direction)
                 if platform_count > 0 {
-                    coordination += platform_count as i32 * 10 * color.sign();
+                    coordination += platform_count * 10 * color.sign();
                 }
             }
         }
 
-        coordination as i32 * (70 + 30 * phase) / 100
+        coordination * (70 + 30 * phase) / 100
     }
 
     fn horse_mobility(board: &Board, pos: Coord, _color: Color) -> i32 {
@@ -2795,15 +2790,15 @@ pub mod eval {
         let mut pawns_per_file = [0i32; 9];
 
         for y in 0..10 {
-            for x in 0..9 {
+            for (x, file_count) in pawns_per_file.iter_mut().enumerate() {
                 let pos = Coord::new(x as i8, y as i8);
                 if let Some(p) = board.get(pos)
                     && p.color == color && p.piece_type == PieceType::Pawn {
-                        pawns_per_file[x] += 1;
+                        *file_count += 1;
 
                         // Doubled pawn penalty: -30 per pawn on a file with 2+ pawns
                         // Only penalize once per file (the second pawn and beyond)
-                        if pawns_per_file[x] >= 2 {
+                        if *file_count >= 2 {
                             score -= 30;
                         }
 
@@ -7457,7 +7452,7 @@ mod tests {
 
     #[test]
     fn test_mate_score_detection() {
-        let mut board = make_board(vec![
+        let board = make_board(vec![
             (4, 9, Color::Red, PieceType::King),
             (4, 0, Color::Black, PieceType::King),
             (4, 1, Color::Red, PieceType::Chariot), // Red chariot checking Black king
@@ -7579,7 +7574,7 @@ mod tests {
         let mut board = Board::new(RuleSet::Official, 1);
         let legal_moves = movegen::generate_legal_moves(&mut board, Color::Red);
         let action = legal_moves[0];
-        let original_cells = board.cells.clone();
+        let original_cells = board.cells;
         let original_key = board.zobrist_key;
 
         board.make_move(action);
@@ -7596,7 +7591,7 @@ mod tests {
         // Find a capture move if any
         let capture_move = legal_moves.into_iter().find(|m| m.captured.is_some());
         if let Some(action) = capture_move {
-            let original_cells = board.cells.clone();
+            let original_cells = board.cells;
             board.make_move(action);
             assert!(action.captured.is_some(), "This should be a capture");
             board.undo_move(action);
@@ -7634,19 +7629,19 @@ mod tests {
     #[test]
     fn test_pst_val_returns_positive_for_good_squares() {
         // Test that chariot evaluates higher than horse (both with kings present)
-        let mut board_chariot = make_board(vec![
+        let board_chariot = make_board(vec![
             (4, 9, Color::Red, PieceType::King),
             (4, 4, Color::Red, PieceType::Chariot),
             (4, 0, Color::Black, PieceType::King),
         ]);
-        let chariot_eval = eval::evaluate(&mut board_chariot, Color::Red);
+        let chariot_eval = eval::evaluate(&board_chariot, Color::Red);
 
-        let mut board_horse = make_board(vec![
+        let board_horse = make_board(vec![
             (4, 9, Color::Red, PieceType::King),
             (4, 4, Color::Red, PieceType::Horse),
             (4, 0, Color::Black, PieceType::King),
         ]);
-        let horse_eval = eval::evaluate(&mut board_horse, Color::Red);
+        let horse_eval = eval::evaluate(&board_horse, Color::Red);
 
         // Chariot (650) + PST should be > Horse (350) + PST
         assert!(chariot_eval > horse_eval,
