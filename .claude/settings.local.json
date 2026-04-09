@@ -25,7 +25,12 @@
       "Bash(python3 -c ':*)",
       "Bash(cargo run:*)",
       "Bash(git add:*)",
-      "Bash(git commit -m ':*)"
+      "Bash(git commit -m ':*)",
+      "Bash(mkdir -p \"F:/RustroverProjects/better_rust_chinese_chess/docs/superpowers/specs\")",
+      "Bash(mkdir -p \"F:/RustroverProjects/better_rust_chinese_chess/docs/superpowers/plans\")",
+      "Bash(grep -v \"C:\\\\\\\\\\\\\\\\Users\\\\\\\\\\\\\\\\53548\\\\\\\\\\\\\\\\.cargo\\\\\\\\\\\\\\\\config\")",
+      "Bash(git merge:*)",
+      "Bash(git stash:*)"
     ]
   }
 }
