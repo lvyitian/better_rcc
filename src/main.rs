@@ -606,13 +606,37 @@ pub mod book {
 
         /// Initialize all opening lines
         fn init_all_openings(&mut self) {
-            self.init_dang_tou_pao();
-            self.init_shun_pao();
-            self.init_lie_pao();
-            self.init_fei_xiang();
-            self.init_qi_ma();
-            self.init_guo_gong_pao();
-            self.init_xian_ren_zhi_lu();
+            let mut board = Board::new(RuleSet::Official, 1);
+            let root_key = board.zobrist_key;
+
+            // Collect unique first moves BEFORE any board mutation.
+            // Some openings share the same first move (e.g., 马八进七 appears twice).
+            let mut root_moves = Vec::new();
+            let add_if_new = |moves: &mut Vec<Action>, m: Action| {
+                if !moves.contains(&m) { moves.push(m); }
+            };
+
+            // 炮二平五 (Cannon 2 flat 5) — Dang Tou Pao / Shun Pao
+            add_if_new(&mut root_moves, Action::new(Coord::new(7, 7), Coord::new(4, 7), None));
+            // 马八进七 (Horse 8 advance 7) — Lie Pao / Qi Ma
+            add_if_new(&mut root_moves, Action::new(Coord::new(1, 9), Coord::new(2, 7), None));
+            // 相三进五 (Elephant 3进5) — Fei Xiang
+            add_if_new(&mut root_moves, Action::new(Coord::new(6, 9), Coord::new(4, 7), None));
+            // 炮八平七 (Cannon 8 flat 7) — Guo Gong Pao
+            add_if_new(&mut root_moves, Action::new(Coord::new(1, 7), Coord::new(3, 7), None));
+            // 兵三进一 (Pawn 3进1) — Xian Ren Zhi Lu
+            add_if_new(&mut root_moves, Action::new(Coord::new(6, 6), Coord::new(6, 5), None));
+
+            self.insert(root_key, &root_moves);
+
+            // Build each line's continuation from ply 2 (ply 1 already recorded above)
+            self.build_dang_tou_pao_line();
+            self.build_shun_pao_line();
+            self.build_lie_pao_line();
+            self.build_fei_xiang_line();
+            self.build_qi_ma_line();
+            self.build_guo_gong_pao_line();
+            self.build_xian_ren_zhi_lu_line();
         }
 
         /// Insert a position with one or more move options (first is primary)
@@ -632,183 +656,135 @@ pub mod book {
             }
         }
 
-        /// 炮二平五 (Cannon 2 flat 5) - Central Cannon opening
-        fn init_dang_tou_pao(&mut self) {
+        /// Dang Tou Pao continuation (ply 2-5): 黑方马8进7, 红方马八进七, 黑方马2进3, (红方车九平八 | 兵五进一)
+        fn build_dang_tou_pao_line(&mut self) {
             let mut board = Board::new(RuleSet::Official, 1);
-            let key = board.zobrist_key;
-            // 红方炮二平五 (7,7)->(4,7)
+            // Play 炮二平五 (ply 1 — already in book at root)
             let a1 = Action::new(Coord::new(7, 7), Coord::new(4, 7), None);
-            self.book.insert(key, a1);
-
             board.make_move(a1);
-            let key = board.zobrist_key;
-            // 黑方马8进7 (7,0)->(6,2)
+            // 黑方马8进7 (ply 2)
             let a2 = Action::new(Coord::new(7, 0), Coord::new(6, 2), None);
-            self.book.insert(key, a2);
-
+            self.book.insert(board.zobrist_key, a2);
             board.make_move(a2);
-            let key = board.zobrist_key;
-            // 红方马八进七 (1,9)->(2,7)
+            // 红方马八进七 (ply 3)
             let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-            self.book.insert(key, a3);
-
+            self.book.insert(board.zobrist_key, a3);
             board.make_move(a3);
-            // 黑方马2进3 (1,0)->(2,2)
+            // 黑方马2进3 (ply 4)
             let a4 = Action::new(Coord::new(1, 0), Coord::new(2, 2), None);
             self.insert(board.zobrist_key, &[a4]);
-
             board.make_move(a4);
-            // 红方车九平八 (0,9)->(0,8)
+            // Branch: 红方车九平八 (main) or 兵五进一 (ply 5)
             let a5_main = Action::new(Coord::new(0, 9), Coord::new(0, 8), None);
-            // 红方兵五进一 (4,6)->(4,5)
             let a5_wuqi = Action::new(Coord::new(4, 6), Coord::new(4, 5), None);
             self.insert(board.zobrist_key, &[a5_main, a5_wuqi]);
 
             let mut board_main = board.clone();
             board_main.make_move(a5_main);
-            // 黑方车1平2 (8,0)->(8,1)
+            // 黑方车1平2 (ply 6)
             let a6 = Action::new(Coord::new(8, 0), Coord::new(8, 1), None);
             self.book.insert(board_main.zobrist_key, a6);
         }
 
-        fn init_shun_pao(&mut self) {
+        fn build_shun_pao_line(&mut self) {
             let mut board = Board::new(RuleSet::Official, 1);
-            let key = board.zobrist_key;
-            // 红方炮二平五 (7,7)->(4,7)
+            // 炮二平五 (ply 1 — already in book)
             let a1 = Action::new(Coord::new(7, 7), Coord::new(4, 7), None);
-            // Use insert to handle positions that may already exist
-            self.insert(key, &[a1]);
-
             board.make_move(a1);
-            let key = board.zobrist_key;
-            // 黑方炮8平5 (7,0)->(4,0)
+            // 黑方炮8平5 (ply 2)
             let a2 = Action::new(Coord::new(7, 0), Coord::new(4, 0), None);
-            self.book.insert(key, a2);
-
+            self.book.insert(board.zobrist_key, a2);
             board.make_move(a2);
-            let key = board.zobrist_key;
-            // 红方马八进七 (1,9)->(2,7)
+            // 红方马八进七 (ply 3)
             let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-            self.book.insert(key, a3);
-
+            self.book.insert(board.zobrist_key, a3);
             board.make_move(a3);
-            let key = board.zobrist_key;
-            // 黑方车1进1 (8,0)->(8,1)
+            // 黑方车1进1 (ply 4)
             let a4 = Action::new(Coord::new(8, 0), Coord::new(8, 1), None);
-            self.book.insert(key, a4);
-
+            self.book.insert(board.zobrist_key, a4);
             board.make_move(a4);
-            let key = board.zobrist_key;
-            // 红方车九平八 (0,9)->(0,8)
+            // 红方车九平八 (ply 5)
             let a5 = Action::new(Coord::new(0, 9), Coord::new(0, 8), None);
-            self.book.insert(key, a5);
+            self.book.insert(board.zobrist_key, a5);
         }
 
-        fn init_lie_pao(&mut self) {
+        fn build_lie_pao_line(&mut self) {
             let mut board = Board::new(RuleSet::Official, 1);
-            // 红方炮二平五 (7,7)->(4,7)
+            // 炮二平五 (ply 1 — already in book)
             let a1 = Action::new(Coord::new(7, 7), Coord::new(4, 7), None);
-
             board.make_move(a1);
-            // 黑方马8进7 (7,0)->(6,2)
+            // 黑方马8进7 (ply 2)
             let a2 = Action::new(Coord::new(7, 0), Coord::new(6, 2), None);
-
             board.make_move(a2);
-            // 红方马八进七 (1,9)->(2,7)
+            // 红方马八进七 (ply 3)
             let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-
             board.make_move(a3);
             let key = board.zobrist_key;
-            // 黑方炮2平5 (1,0)->(4,0)
+            // 黑方炮2平5 (lie) or 马2进3 (normal) — ply 4 alternatives
             let a4_lie = Action::new(Coord::new(1, 0), Coord::new(4, 0), None);
-            // 黑方马2进3 (1,0)->(2,2)
             let a4_normal = Action::new(Coord::new(1, 0), Coord::new(2, 2), None);
             self.insert(key, &[a4_normal, a4_lie]);
         }
 
-        fn init_fei_xiang(&mut self) {
+        fn build_fei_xiang_line(&mut self) {
             let mut board = Board::new(RuleSet::Official, 1);
-            let key = board.zobrist_key;
-            // 红方相三进五 (6,9)->(4,7)
+            // 相三进五 (ply 1 — already in book)
             let a1 = Action::new(Coord::new(6, 9), Coord::new(4, 7), None);
-            self.insert(key, &[a1]);
-
             board.make_move(a1);
-            let key = board.zobrist_key;
-            // 黑方炮8平5 (7,0)->(4,0)
+            // 黑方炮8平5 (ply 2)
             let a2 = Action::new(Coord::new(7, 0), Coord::new(4, 0), None);
-            self.book.insert(key, a2);
-
+            self.book.insert(board.zobrist_key, a2);
             board.make_move(a2);
-            let key = board.zobrist_key;
-            // 红方马八进七 (1,9)->(2,7)
+            // 红方马八进七 (ply 3)
             let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-            self.book.insert(key, a3);
+            self.book.insert(board.zobrist_key, a3);
         }
 
-        fn init_qi_ma(&mut self) {
+        fn build_qi_ma_line(&mut self) {
             let mut board = Board::new(RuleSet::Official, 1);
-            let key = board.zobrist_key;
-            // 红方马八进七 (1,9)->(2,7)
+            // 马八进七 (ply 1 — already in book)
             let a1 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-            self.insert(key, &[a1]);
-
             board.make_move(a1);
-            let key = board.zobrist_key;
-            // 黑方卒7进1 (6,3)->(6,4)
+            // 黑方卒7进1 (ply 2)
             let a2 = Action::new(Coord::new(6, 3), Coord::new(6, 4), None);
-            self.book.insert(key, a2);
-
+            self.book.insert(board.zobrist_key, a2);
             board.make_move(a2);
-            let key = board.zobrist_key;
-            // 修正：红方兵三进一 (6,6)->(6,5)
+            // 红方兵三进一 (ply 3)
             let a3 = Action::new(Coord::new(6, 6), Coord::new(6, 5), None);
-            self.book.insert(key, a3);
+            self.book.insert(board.zobrist_key, a3);
         }
 
-        fn init_guo_gong_pao(&mut self) {
+        fn build_guo_gong_pao_line(&mut self) {
             let mut board = Board::new(RuleSet::Official, 1);
-            let key = board.zobrist_key;
-            // 红方炮八平七 (1,7)->(3,7)
+            // 炮八平七 (ply 1 — already in book)
             let a1 = Action::new(Coord::new(1, 7), Coord::new(3, 7), None);
-            self.insert(key, &[a1]);
-
             board.make_move(a1);
-            let key = board.zobrist_key;
-            // 黑方马8进7 (7,0)->(6,2)
+            // 黑方马8进7 (ply 2)
             let a2 = Action::new(Coord::new(7, 0), Coord::new(6, 2), None);
-            self.book.insert(key, a2);
-
+            self.book.insert(board.zobrist_key, a2);
             board.make_move(a2);
-            let key = board.zobrist_key;
-            // 红方马八进七 (1,9)->(2,7)
+            // 红方马八进七 (ply 3)
             let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-            self.book.insert(key, a3);
+            self.book.insert(board.zobrist_key, a3);
         }
 
-        fn init_xian_ren_zhi_lu(&mut self) {
+        fn build_xian_ren_zhi_lu_line(&mut self) {
             let mut board = Board::new(RuleSet::Official, 1);
-            let key = board.zobrist_key;
-            // 修正：红方兵三进一 (6,6)->(6,5)
+            // 兵三进一 (ply 1 — already in book)
             let a1 = Action::new(Coord::new(6, 6), Coord::new(6, 5), None);
-            self.insert(key, &[a1]);
-
             board.make_move(a1);
-            let key = board.zobrist_key;
-            // 黑方卒7进1 (6,3)->(6,4)
+            // 黑方卒7进1 (ply 2)
             let a2 = Action::new(Coord::new(6, 3), Coord::new(6, 4), None);
-            self.book.insert(key, a2);
-
+            self.book.insert(board.zobrist_key, a2);
             board.make_move(a2);
-            let key = board.zobrist_key;
-            // 红方炮八平五 (1,7)->(4,7)
+            // 红方炮八平五 (ply 3)
             let a3 = Action::new(Coord::new(1, 7), Coord::new(4, 7), None);
-            self.book.insert(key, a3);
+            self.book.insert(board.zobrist_key, a3);
         }
 
         /// Look up the best move for the current position
         /// Returns None if position is not in book
-        pub fn probe(&self, board: &Board) -> Option<Action> {
+        pub fn probe(&self, board: &mut Board) -> Option<Action> {
             let key = board.zobrist_key;
             let primary = *self.book.get(&key)?;
 
@@ -825,12 +801,20 @@ pub mod book {
                 candidates.extend(alts.iter().copied());
             }
 
-            // Filter to only legal moves
-            let valid_moves: Vec<Action> = candidates.into_iter()
+            // Filter to only legal moves (occupancy check first)
+            let occupancy_ok: Vec<Action> = candidates.into_iter()
                 .filter(|a| {
                     board.get(a.src).is_some()
                         && (board.get(a.tar).is_none()
                             || board.get(a.tar).is_some_and(|p| p.color != board.current_side))
+                })
+                .collect();
+
+            // Now check self-check legality (requires mutable borrow, done separately)
+            let valid_moves: Vec<Action> = occupancy_ok.into_iter()
+                .filter(|a| {
+                    let (legal, _) = movegen::is_legal_move(board, *a, board.current_side);
+                    legal
                 })
                 .collect();
 
@@ -874,7 +858,7 @@ pub mod book {
 
     impl EndgameTablebase {
         #[inline(always)]
-        fn check_double_chariot_vs_single(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<i32> {
+        fn check_double_chariot_vs_single(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<(i32, f32)> {
             if red[PieceType::King as usize] == 1
                 && red[PieceType::Chariot as usize] == 2
                 && red_other == 2
@@ -883,13 +867,15 @@ pub mod book {
                 && (1..=4).contains(&black_other)
             {
                 let score = 85000;
-                return Some(if side == Color::Red { score } else { -score });
+                let total_pieces = 2 + red_other + black_other;
+                let confidence = (1.0 - (total_pieces as f32 / 32.0)).clamp(0.0, 1.0);
+                return Some((if side == Color::Red { score } else { -score }, confidence));
             }
             None
         }
 
         #[inline(always)]
-        fn check_chariot_cannon_vs_chariot(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<i32> {
+        fn check_chariot_cannon_vs_chariot(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<(i32, f32)> {
             if red[PieceType::King as usize] == 1
                 && red[PieceType::Chariot as usize] == 1
                 && red[PieceType::Cannon as usize] == 1
@@ -899,13 +885,15 @@ pub mod book {
                 && black_other == 1
             {
                 let score = 78000;
-                return Some(if side == Color::Red { score } else { -score });
+                let total_pieces = 2 + red_other + black_other;
+                let confidence = (1.0 - (total_pieces as f32 / 32.0)).clamp(0.0, 1.0);
+                return Some((if side == Color::Red { score } else { -score }, confidence));
             }
             None
         }
 
         #[inline(always)]
-        fn check_pawn_vs_advisor(board: &Board, red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<i32> {
+        fn check_pawn_vs_advisor(board: &Board, red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<(i32, f32)> {
             if red[PieceType::King as usize] == 1
                 && red[PieceType::Pawn as usize] == 1
                 && red_other == 1
@@ -929,14 +917,16 @@ pub mod book {
                 if let Some(pos) = pawn_pos
                     && pos.crosses_river(Color::Red) {
                         let score = 80000;
-                        return Some(if side == Color::Red { score } else { -score });
+                        let total_pieces = 2 + red_other + black_other;
+                        let confidence = (1.0 - (total_pieces as f32 / 32.0)).clamp(0.0, 1.0);
+                        return Some((if side == Color::Red { score } else { -score }, confidence));
                     }
             }
             None
         }
 
         #[inline(always)]
-        fn check_horse_cannon_vs_double_advisor(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<i32> {
+        fn check_horse_cannon_vs_double_advisor(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<(i32, f32)> {
             if red[PieceType::King as usize] == 1
                 && red[PieceType::Horse as usize] == 1
                 && red[PieceType::Cannon as usize] == 1
@@ -946,13 +936,15 @@ pub mod book {
                 && black_other == 2
             {
                 let score = 72000;
-                return Some(if side == Color::Red { score } else { -score });
+                let total_pieces = 2 + red_other + black_other;
+                let confidence = (1.0 - (total_pieces as f32 / 32.0)).clamp(0.0, 1.0);
+                return Some((if side == Color::Red { score } else { -score }, confidence));
             }
             None
         }
 
         #[inline(always)]
-        fn check_horse_vs_advisor(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<i32> {
+        fn check_horse_vs_advisor(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<(i32, f32)> {
             if red[PieceType::King as usize] == 1
                 && red[PieceType::Horse as usize] == 1
                 && red_other == 1
@@ -961,13 +953,15 @@ pub mod book {
                 && black_other == 1
             {
                 let score = 68000;
-                return Some(if side == Color::Red { score } else { -score });
+                let total_pieces = 2 + red_other + black_other;
+                let confidence = (1.0 - (total_pieces as f32 / 32.0)).clamp(0.0, 1.0);
+                return Some((if side == Color::Red { score } else { -score }, confidence));
             }
             None
         }
 
         #[inline(always)]
-        fn check_cannon_advisor_vs_advisor(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<i32> {
+        fn check_cannon_advisor_vs_advisor(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<(i32, f32)> {
             if red[PieceType::King as usize] == 1
                 && red[PieceType::Cannon as usize] == 1
                 && red[PieceType::Advisor as usize] == 1
@@ -977,13 +971,15 @@ pub mod book {
                 && black_other == 1
             {
                 let score = 70000;
-                return Some(if side == Color::Red { score } else { -score });
+                let total_pieces = 2 + red_other + black_other;
+                let confidence = (1.0 - (total_pieces as f32 / 32.0)).clamp(0.0, 1.0);
+                return Some((if side == Color::Red { score } else { -score }, confidence));
             }
             None
         }
 
         #[inline(always)]
-        fn check_chariot_vs_defense(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<i32> {
+        fn check_chariot_vs_defense(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<(i32, f32)> {
             if red[PieceType::King as usize] == 1
                 && red[PieceType::Chariot as usize] == 1
                 && red_other == 1
@@ -992,12 +988,105 @@ pub mod book {
                     || black_other == 2 && (black[PieceType::Advisor as usize] == 2 || black[PieceType::Elephant as usize] == 2))
                 {
                     let score = 75000;
-                    return Some(if side == Color::Red { score } else { -score });
+                    let total_pieces = 2 + red_other + black_other;
+                    let confidence = (1.0 - (total_pieces as f32 / 32.0)).clamp(0.0, 1.0);
+                    return Some((if side == Color::Red { score } else { -score }, confidence));
                 }
             None
         }
 
-        pub fn probe(board: &Board, side: Color) -> Option<i32> {
+        /// Chariot vs Chariot: symmetrical, small edge for side to move (initiative)
+        #[inline(always)]
+        fn check_chariot_vs_chariot(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<(i32, f32)> {
+            if red[PieceType::King as usize] == 1
+                && red[PieceType::Chariot as usize] == 1
+                && red_other == 1
+                && black[PieceType::King as usize] == 1
+                && black[PieceType::Chariot as usize] == 1
+                && black_other == 1
+            {
+                let score = 5000;
+                let total_pieces = 2 + red_other + black_other;
+                let confidence = (1.0 - (total_pieces as f32 / 32.0)).clamp(0.0, 1.0);
+                return Some((if side == Color::Red { score } else { -score }, confidence));
+            }
+            None
+        }
+
+        /// Rook + 2 Advisors vs Rook: material + positional advantage for Red
+        #[inline(always)]
+        fn check_rook_2advisors_vs_rook(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<(i32, f32)> {
+            if red[PieceType::King as usize] == 1
+                && red[PieceType::Chariot as usize] == 1
+                && red[PieceType::Advisor as usize] == 2
+                && red_other == 3
+                && black[PieceType::King as usize] == 1
+                && black[PieceType::Chariot as usize] == 1
+                && black_other == 1
+            {
+                let score = 60000;
+                let total_pieces = 2 + red_other + black_other;
+                let confidence = (1.0 - (total_pieces as f32 / 32.0)).clamp(0.0, 1.0);
+                return Some((if side == Color::Red { score } else { -score }, confidence));
+            }
+            None
+        }
+
+        /// Rook vs 2 Advisors: defensive, advisors neutralize rook
+        #[inline(always)]
+        fn check_rook_vs_2advisors(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<(i32, f32)> {
+            if red[PieceType::King as usize] == 1
+                && red[PieceType::Chariot as usize] == 1
+                && red_other == 1
+                && black[PieceType::King as usize] == 1
+                && black[PieceType::Advisor as usize] == 2
+                && black_other == 2
+            {
+                let score = -40000;
+                let total_pieces = 2 + red_other + black_other;
+                let confidence = (1.0 - (total_pieces as f32 / 32.0)).clamp(0.0, 1.0);
+                return Some((if side == Color::Red { score } else { -score }, confidence));
+            }
+            None
+        }
+
+        /// Two Elephants vs Nothing: solid defensive material, small edge
+        #[inline(always)]
+        fn check_two_elephants_vs_nothing(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<(i32, f32)> {
+            if red[PieceType::King as usize] == 1
+                && red[PieceType::Elephant as usize] == 2
+                && red_other == 2
+                && black[PieceType::King as usize] == 1
+                && black_other == 0
+            {
+                let score = 35000;
+                let total_pieces = 2 + red_other + black_other;
+                let confidence = (1.0 - (total_pieces as f32 / 32.0)).clamp(0.0, 1.0);
+                return Some((if side == Color::Red { score } else { -score }, confidence));
+            }
+            None
+        }
+
+        /// Horse + Pawn vs Advisor: slight material + positional edge
+        #[inline(always)]
+        fn check_horse_pawn_vs_advisor(red: &[i32; 7], black: &[i32; 7], red_other: i32, black_other: i32, side: Color) -> Option<(i32, f32)> {
+            if red[PieceType::King as usize] == 1
+                && red[PieceType::Horse as usize] == 1
+                && red[PieceType::Pawn as usize] == 1
+                && red_other == 2
+                && black[PieceType::King as usize] == 1
+                && black[PieceType::Advisor as usize] == 1
+                && black_other == 1
+            {
+                let score = 55000;
+                let total_pieces = 2 + red_other + black_other;
+                let confidence = (1.0 - (total_pieces as f32 / 32.0)).clamp(0.0, 1.0);
+                return Some((if side == Color::Red { score } else { -score }, confidence));
+            }
+            None
+        }
+
+        pub fn probe(board: &Board, side: Color) -> Option<(i32, f32)> {
             // Count pieces per side using iterator pattern
             let (red, black) = board.piece_counts();
 
@@ -1005,26 +1094,41 @@ pub mod book {
             let black_other = black[1..].iter().sum::<i32>();
 
             // Check each known endgame pattern in priority order
-            if let Some(score) = Self::check_double_chariot_vs_single(&red, &black, red_other, black_other, side) {
-                return Some(score);
+            if let Some((score, conf)) = Self::check_double_chariot_vs_single(&red, &black, red_other, black_other, side) {
+                return Some((score, conf));
             }
-            if let Some(score) = Self::check_chariot_cannon_vs_chariot(&red, &black, red_other, black_other, side) {
-                return Some(score);
+            if let Some((score, conf)) = Self::check_chariot_cannon_vs_chariot(&red, &black, red_other, black_other, side) {
+                return Some((score, conf));
             }
-            if let Some(score) = Self::check_pawn_vs_advisor(board, &red, &black, red_other, black_other, side) {
-                return Some(score);
+            if let Some((score, conf)) = Self::check_pawn_vs_advisor(board, &red, &black, red_other, black_other, side) {
+                return Some((score, conf));
             }
-            if let Some(score) = Self::check_horse_cannon_vs_double_advisor(&red, &black, red_other, black_other, side) {
-                return Some(score);
+            if let Some((score, conf)) = Self::check_horse_cannon_vs_double_advisor(&red, &black, red_other, black_other, side) {
+                return Some((score, conf));
             }
-            if let Some(score) = Self::check_horse_vs_advisor(&red, &black, red_other, black_other, side) {
-                return Some(score);
+            if let Some((score, conf)) = Self::check_horse_vs_advisor(&red, &black, red_other, black_other, side) {
+                return Some((score, conf));
             }
-            if let Some(score) = Self::check_cannon_advisor_vs_advisor(&red, &black, red_other, black_other, side) {
-                return Some(score);
+            if let Some((score, conf)) = Self::check_cannon_advisor_vs_advisor(&red, &black, red_other, black_other, side) {
+                return Some((score, conf));
             }
-            if let Some(score) = Self::check_chariot_vs_defense(&red, &black, red_other, black_other, side) {
-                return Some(score);
+            if let Some((score, conf)) = Self::check_chariot_vs_defense(&red, &black, red_other, black_other, side) {
+                return Some((score, conf));
+            }
+            if let Some((score, conf)) = Self::check_chariot_vs_chariot(&red, &black, red_other, black_other, side) {
+                return Some((score, conf));
+            }
+            if let Some((score, conf)) = Self::check_rook_2advisors_vs_rook(&red, &black, red_other, black_other, side) {
+                return Some((score, conf));
+            }
+            if let Some((score, conf)) = Self::check_rook_vs_2advisors(&red, &black, red_other, black_other, side) {
+                return Some((score, conf));
+            }
+            if let Some((score, conf)) = Self::check_two_elephants_vs_nothing(&red, &black, red_other, black_other, side) {
+                return Some((score, conf));
+            }
+            if let Some((score, conf)) = Self::check_horse_pawn_vs_advisor(&red, &black, red_other, black_other, side) {
+                return Some((score, conf));
             }
 
             None
@@ -3159,16 +3263,27 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
     }
 
     pub fn evaluate(board: &Board, side: Color, initiative: bool) -> i32 {
-        if let Some(score) = EndgameTablebase::probe(board, side) {
-            return score;
-        }
-
+        // Compute regular evaluation result first (needed for blending)
         let (rk, bk) = board.find_kings();
+
+        // Handle checkmate positions
         if rk.is_none() {
-            return if side == Color::Red { -MATE_SCORE } else { MATE_SCORE };
+            let fallback = if side == Color::Red { -MATE_SCORE } else { MATE_SCORE };
+            if let Some((tb_score, conf)) = EndgameTablebase::probe(board, side) {
+                if conf < 0.2 { return tb_score; }
+                let weight = conf.max(0.3);
+                return ((tb_score as f32 * weight + fallback as f32 * (1.0 - weight)) as i32);
+            }
+            return fallback;
         }
         if bk.is_none() {
-            return if side == Color::Red { MATE_SCORE } else { -MATE_SCORE };
+            let fallback = if side == Color::Red { MATE_SCORE } else { -MATE_SCORE };
+            if let Some((tb_score, conf)) = EndgameTablebase::probe(board, side) {
+                if conf < 0.2 { return tb_score; }
+                let weight = conf.max(0.3);
+                return ((tb_score as f32 * weight + fallback as f32 * (1.0 - weight)) as i32);
+            }
+            return fallback;
         }
 
         let phase = game_phase(board);
@@ -3286,7 +3401,16 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
             score += 20 * side.sign();
         }
 
-        score * side.sign()
+        let regular_score = score * side.sign();
+
+        // Blend with tablebase if available
+        if let Some((tb_score, conf)) = EndgameTablebase::probe(board, side) {
+            if conf < 0.2 { return tb_score; }
+            let weight = conf.max(0.3);
+            return ((tb_score as f32 * weight + regular_score as f32 * (1.0 - weight)) as i32);
+        }
+
+        regular_score
     }
 }
 
