@@ -2,9 +2,10 @@
 // Note: handcrafted_evaluate is imported directly by nn_eval via crate::eval::eval::handcrafted_evaluate
 
 // Re-export types needed by nn_eval (these are pub in main.rs)
+#[allow(unused_imports)]
 pub use crate::{
     Board, Color, PieceType, Piece, Coord,
-    movegen,
+    movegen, RuleSet,
 };
 pub use crate::book::EndgameTablebase;
 
