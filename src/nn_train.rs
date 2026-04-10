@@ -219,21 +219,19 @@ pub mod nn_train_impl {
                 let score_out = net.score_head.forward(dense_out);
 
                 // MSE loss: mean((score_normalized - target)^2) where score_normalized = score/300
-                // Compute per-sample losses then mean
-                let mut batch_loss: f32 = 0.0;
-                let score_vals: Vec<f32> = score_out.to_data().as_slice().expect("batch scores").to_vec();
-                for (i, &target) in targets.iter().enumerate() {
-                    let normalized = score_vals[i] / 300.0;
-                    let diff = normalized - target;
-                    batch_loss += diff * diff;
-                }
-                batch_loss /= batch.len() as f32;
-
-                // Backward pass
-                let loss_tensor: Tensor<TrainBackend, 1> = Tensor::from_data(
-                    TensorData::from([batch_loss]), &device
+                // All computation stays in Burn tensors to preserve autodiff graph
+                let targets_tensor: Tensor<TrainBackend, 1> = Tensor::from_data(
+                    TensorData::from(targets.as_slice()), &device
                 );
-                let grads = loss_tensor.backward();
+                let score_squeezed = score_out.reshape([batch.len() as u32]);
+                let normalized = score_squeezed / 300.0;
+                let diff = normalized - targets_tensor;
+                let loss_tensor = diff.clone() * diff;
+                let batch_loss: f32 = loss_tensor.clone().mean().to_data().as_slice()
+                    .expect("batch loss")[0];
+
+                // Backward pass — grads flow through entire model
+                let grads = loss_tensor.mean().backward();
                 let grads = GradientsParams::from_grads(grads, &*net);
                 let new_net = optim.step(lr, (*net).clone(), grads);
                 *net = new_net;
@@ -524,6 +522,67 @@ pub mod nn_train_impl {
 
         pub fn into_samples(self) -> Vec<TrainingSample> {
             self.samples
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Regression test: MSE loss backward must not panic with
+        /// "Node should have a step registered, did you forget to call `Tensor::register_grad`?"
+        ///
+        /// The original bug broke the autodiff graph by extracting `score_out` to a CPU `Vec`,
+        /// computing loss in a Rust loop, then creating a disconnected `loss_tensor` from raw data.
+        /// Calling `backward()` on that leaf tensor had no gradient path back to model parameters.
+        ///
+        /// The fix: keep all loss computation in Burn tensor ops so `backward()` traces
+        /// the full path score_out → dense → conv → model weights.
+        #[test]
+        fn test_train_supervised_backward_graph_integrity() {
+            use burn::tensor::TensorData;
+            use burn::optim::GradientsParams;
+
+            let net = CompactResNetBurn::<TrainBackend>::new();
+            let device = <TrainBackend as Backend>::Device::default();
+
+            // One sample with known label
+            let board = Board::new(crate::RuleSet::Official, 1);
+            let sample = TrainingSample::from_board(&board, Color::Red, 100);
+
+            // Build single-element batch
+            let input: Tensor<TrainBackend, 4> = Tensor::from_data(
+                TensorData::new(sample.planes.clone(), [1, 38, 9, 10]), &device
+            );
+            let targets = vec![sample.label];
+
+            // Forward pass (same ops as train_supervised)
+            let x = net.init_conv.forward(input);
+            let x = net.relu.forward(x);
+            let x = net.b1.forward(x);
+            let x = net.b2.forward(x);
+            let x = net.b3.forward(x);
+            let x = net.b4.forward(x);
+            let x = net.b5.forward(x);
+            let x = net.b6.forward(x);
+            let pooled = x.mean_dim(3).mean_dim(2).reshape([1, 64]);
+            let dense_out = net.relu.forward(net.dense.forward(pooled));
+            let score_out = net.score_head.forward(dense_out);
+
+            // Loss computed entirely in tensor space — preserves autodiff graph
+            let targets_tensor: Tensor<TrainBackend, 1> =
+                Tensor::from_data(TensorData::from(targets.as_slice()), &device);
+            let score_squeezed = score_out.reshape([1]);
+            let normalized = score_squeezed / 300.0;
+            let diff = normalized - targets_tensor;
+            let loss_tensor = diff.clone() * diff;
+
+            // This must NOT panic with "Node should have a step registered"
+            let grads = loss_tensor.mean().backward();
+
+            // Verify GradientsParams can be constructed (proves grads are well-formed)
+            let _grads_params = GradientsParams::from_grads(grads, &net);
+            // If we got here without panic, the autodiff graph is intact
         }
     }
 }
