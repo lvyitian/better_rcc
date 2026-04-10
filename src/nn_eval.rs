@@ -7,6 +7,13 @@ use crate::RuleSet;
 use crate::eval::eval::{handcrafted_evaluate, game_phase};
 use ndarray::{Array4, Array3, Array2, Array1};
 
+#[cfg(feature = "train")]
+use burn::prelude::*;
+#[cfg(feature = "train")]
+use burn::module::Module;
+#[cfg(feature = "train")]
+use burn::nn::{PaddingConfig2d, Relu};
+
 /// Input planes for neural network evaluation.
 /// 38 planes of 9x10 = 3420 total values.
 /// Layout: data[plane * 90 + y * 9 + x]
@@ -387,8 +394,162 @@ impl Default for CompactResNet {
 }
 
 // =============================================================================
-// Evaluation Dispatch
+// Compact ResNet for Neural Network Evaluation (burn)
 // =============================================================================
+
+/// Residual block for burn: two 3×3 convs with optional 1×1 skip for channel changes.
+#[cfg(feature = "train")]
+#[derive(Module, Debug)]
+pub struct ResBlock<B: Backend> {
+    conv1: burn::nn::conv::Conv2d<B>,
+    conv2: burn::nn::conv::Conv2d<B>,
+    skip: Option<burn::nn::conv::Conv2d<B>>,
+    relu: Relu,
+}
+
+#[cfg(feature = "train")]
+impl<B: Backend> ResBlock<B> {
+    /// channels: [in, out]. If in != out, creates a 1×1 conv skip.
+    fn new(channels: [usize; 2]) -> Self {
+        let device = <B as Backend>::Device::default();
+        let (in_ch, out_ch) = (channels[0], channels[1]);
+        let conv1 = burn::nn::conv::Conv2dConfig::new([in_ch, out_ch], [3, 3])
+            .with_padding(PaddingConfig2d::Same)
+            .with_bias(true)
+            .init(&device);
+        let conv2 = burn::nn::conv::Conv2dConfig::new([out_ch, out_ch], [3, 3])
+            .with_padding(PaddingConfig2d::Same)
+            .with_bias(true)
+            .init(&device);
+        let skip = if in_ch != out_ch {
+            Some(burn::nn::conv::Conv2dConfig::new([in_ch, out_ch], [1, 1])
+                .with_padding(PaddingConfig2d::Valid)
+                .with_bias(true)
+                .init(&device))
+        } else {
+            None
+        };
+        Self { conv1, conv2, skip, relu: Relu::new() }
+    }
+
+    fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+        let x2 = x.clone();
+        let h = self.relu.forward(self.conv1.forward(x));
+        let skip_h = if let Some(ref skip_conv) = self.skip {
+            skip_conv.forward(x2)
+        } else {
+            x2
+        };
+        let h = self.conv2.forward(h) + skip_h;
+        self.relu.forward(h)
+    }
+}
+
+/// Compact ResNet using burn Module derive.
+#[cfg(feature = "train")]
+#[derive(Module, Debug)]
+pub struct CompactResNetBurn<B: Backend = burn_ndarray::NdArray<f32>> {
+    init_conv: burn::nn::conv::Conv2d<B>,
+    b1: ResBlock<B>,
+    b2: ResBlock<B>,
+    b3: ResBlock<B>,
+    b4: ResBlock<B>,
+    b5: ResBlock<B>,
+    b6: ResBlock<B>,
+    dense: burn::nn::Linear<B>,
+    alpha_head: burn::nn::Linear<B>,
+    beta_head: burn::nn::Linear<B>,
+    score_head: burn::nn::Linear<B>,
+    correction_head: burn::nn::Linear<B>,
+    relu: Relu,
+}
+
+#[cfg(feature = "train")]
+impl<B: Backend> CompactResNetBurn<B> {
+    pub fn new() -> Self {
+        let device = <B as Backend>::Device::default();
+        let init_conv = burn::nn::conv::Conv2dConfig::new([38, 32], [3, 3])
+            .with_padding(PaddingConfig2d::Same)
+            .with_bias(true)
+            .init(&device);
+        let b1 = ResBlock::new([32, 32]);
+        let b2 = ResBlock::new([32, 32]);
+        let b3 = ResBlock::new([32, 64]); // downsample: 32→64
+        let b4 = ResBlock::new([64, 64]);
+        let b5 = ResBlock::new([64, 64]);
+        let b6 = ResBlock::new([64, 64]);
+        let dense = burn::nn::LinearConfig::new(64, 64)
+            .with_bias(true)
+            .init(&device);
+        let alpha_head = burn::nn::LinearConfig::new(64, 1)
+            .with_bias(true)
+            .init(&device);
+        let beta_head = burn::nn::LinearConfig::new(64, 1)
+            .with_bias(true)
+            .init(&device);
+        let score_head = burn::nn::LinearConfig::new(64, 1)
+            .with_bias(true)
+            .init(&device);
+        let correction_head = burn::nn::LinearConfig::new(64, 1)
+            .with_bias(true)
+            .init(&device);
+        Self {
+            init_conv, b1, b2, b3, b4, b5, b6,
+            dense, alpha_head, beta_head, score_head, correction_head,
+            relu: Relu::new(),
+        }
+    }
+
+    /// Forward pass producing NNOutput.
+    pub fn forward_for_inference(&self, planes: &InputPlanes) -> NNOutput
+    {
+        use burn::tensor::TensorData;
+        let device = <B as Backend>::Device::default();
+        // Convert flat [f32; 3420] → Tensor<B, 4> shape [1, 38, 9, 10]
+        let flat_arr: [f32; 3420] = planes.data;
+        let data = TensorData::from(flat_arr);
+        let flat: Tensor<B, 1> = Tensor::from_data(data, &device);
+        let x: Tensor<B, 4> = flat.reshape([1, 38, 9, 10]);
+
+        // Initial conv: 38 → 32
+        let x = self.relu.forward(self.init_conv.forward(x));
+
+        // Residual blocks
+        let x = self.b1.forward(x);
+        let x = self.b2.forward(x);
+        let x = self.b3.forward(x);
+        let x = self.b4.forward(x);
+        let x = self.b5.forward(x);
+        let x = self.b6.forward(x);
+
+        // Global average pool: [1, 64, 9, 10] → [1, 64]
+        let pooled = x.mean_dim(3).mean_dim(2).reshape([1, 64]); // [1, 64]
+
+        // Dense + ReLU
+        let dense_out = self.relu.forward(self.dense.forward(pooled));
+
+        // Heads
+        let to_f32 = |t: Tensor<B, 2>| -> f32 {
+            t.to_data().as_slice().expect("expected 1x1 tensor")[0]
+        };
+        let alpha_raw = to_f32(self.alpha_head.forward(dense_out.clone()));
+        let beta_raw = to_f32(self.beta_head.forward(dense_out.clone()));
+        let score_raw = to_f32(self.score_head.forward(dense_out.clone()));
+        let correction_raw = to_f32(self.correction_head.forward(dense_out));
+
+        let alpha = (1.0f32 / (1.0f32 + (-alpha_raw).exp())) * 0.9 + 0.05;
+        let beta = (1.0f32 / (1.0f32 + (-beta_raw).exp())) * 0.9 + 0.05;
+        let nn_score = score_raw.tanh() * 300.0;
+        let correction = correction_raw.tanh() * 300.0;
+
+        NNOutput { alpha, beta, nn_score, correction }
+    }
+}
+
+#[cfg(feature = "train")]
+impl<B: Backend> Default for CompactResNetBurn<B> {
+    fn default() -> Self { Self::new() }
+}
 
 /// Output of the neural network forward pass.
 #[derive(Debug, Clone, Copy)]
@@ -404,7 +565,8 @@ pub struct NNOutput {
     pub correction: f32,
 }
 
-/// Global NN instance, lazily initialized.
+/// Global NN instance (ndarray version), lazily initialized.
+#[cfg(not(feature = "train"))]
 static NN_NET: std::sync::LazyLock<CompactResNet> =
     std::sync::LazyLock::new(CompactResNet::new);
 
@@ -413,7 +575,7 @@ static NN_NET: std::sync::LazyLock<CompactResNet> =
 /// Blending formula (per spec):
 ///   final_score = (alpha / (alpha + beta)) * nn_score
 ///               + (beta / (alpha + beta)) * handcrafted_score
-///               + correction * scale
+///               + correction
 ///
 /// Where alpha, beta ∈ [0.05, 0.95] (sigmoid-clamped), nn_score ∈ [-300, 300],
 /// correction ∈ [-300, 300], handcrafted_score is in centipawns.
@@ -422,6 +584,16 @@ pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) 
     let handcrafted = handcrafted_evaluate(board, side, initiative);
 
     let input = InputPlanes::from_board(board, side);
+
+    #[cfg(feature = "train")]
+    let output = {
+        type InferenceBackend = burn_ndarray::NdArray<f32>;
+        static NET: std::sync::LazyLock<CompactResNetBurn<InferenceBackend>> =
+            std::sync::LazyLock::new(CompactResNetBurn::new);
+        NET.forward_for_inference(&input)
+    };
+
+    #[cfg(not(feature = "train"))]
     let output = NN_NET.forward(&input);
 
     // Normalize alpha + beta to sum to 1 (with minimum floor of 0.05)
