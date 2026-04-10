@@ -12,7 +12,7 @@ use burn::prelude::*;
 #[cfg(feature = "train")]
 use burn::module::Module;
 #[cfg(feature = "train")]
-use burn::nn::{PaddingConfig2d, Relu};
+use burn::nn::{PaddingConfig2d, Relu, BatchNorm, BatchNormConfig};
 
 /// Input planes for neural network evaluation.
 /// 38 planes of 9x10 = 3420 total values.
@@ -430,12 +430,16 @@ impl Default for CompactResNet {
 // =============================================================================
 
 /// Residual block for burn: two 3×3 convs with optional 1×1 skip for channel changes.
+/// Per ResNet v2: bn → relu → conv for each conv layer; skip added before final relu.
 #[cfg(feature = "train")]
 #[derive(Module, Debug)]
 pub struct ResBlock<B: Backend> {
     pub conv1: burn::nn::conv::Conv2d<B>,
+    pub bn1: BatchNorm<B>,
     pub conv2: burn::nn::conv::Conv2d<B>,
-    pub skip: Option<burn::nn::conv::Conv2d<B>>,
+    pub bn2: BatchNorm<B>,
+    /// Optional 1×1 conv for channel change in skip connection.
+    pub skip_conv: Option<burn::nn::conv::Conv2d<B>>,
     pub relu: Relu,
 }
 
@@ -445,15 +449,26 @@ impl<B: Backend> ResBlock<B> {
     fn new(channels: [usize; 2]) -> Self {
         let device = <B as Backend>::Device::default();
         let (in_ch, out_ch) = (channels[0], channels[1]);
+
+        let bn1 = BatchNormConfig::new(out_ch)
+            .with_momentum(0.1)
+            .with_epsilon(1e-5)
+            .init(&device);
         let conv1 = burn::nn::conv::Conv2dConfig::new([in_ch, out_ch], [3, 3])
             .with_padding(PaddingConfig2d::Same)
             .with_bias(true)
+            .init(&device);
+
+        let bn2 = BatchNormConfig::new(out_ch)
+            .with_momentum(0.1)
+            .with_epsilon(1e-5)
             .init(&device);
         let conv2 = burn::nn::conv::Conv2dConfig::new([out_ch, out_ch], [3, 3])
             .with_padding(PaddingConfig2d::Same)
             .with_bias(true)
             .init(&device);
-        let skip = if in_ch != out_ch {
+
+        let skip_conv = if in_ch != out_ch {
             Some(burn::nn::conv::Conv2dConfig::new([in_ch, out_ch], [1, 1])
                 .with_padding(PaddingConfig2d::Valid)
                 .with_bias(true)
@@ -461,18 +476,37 @@ impl<B: Backend> ResBlock<B> {
         } else {
             None
         };
-        Self { conv1, conv2, skip, relu: Relu::new() }
+
+        Self { conv1, bn1, conv2, bn2, skip_conv, relu: Relu::new() }
     }
 
     pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
-        let x2 = x.clone();
-        let h = self.relu.forward(self.conv1.forward(x));
-        let skip_h = if let Some(ref skip_conv) = self.skip {
-            skip_conv.forward(x2)
+        // ResNet v2: bn → relu → conv for each conv layer.
+        // Main path: bn1 → relu → conv1 → bn2 → relu → conv2
+        // Skip path: bn1 → relu → conv_skip (when channels change)
+        // Final: add + relu
+        let skip_h = if let Some(ref skip_conv) = self.skip_conv {
+            // bn1 → relu applied to original x for skip normalization
+            let sx = self.bn1.forward(x.clone());
+            let sx = self.relu.forward(sx);
+            skip_conv.forward(sx)
         } else {
-            x2
+            // Identity skip: x as-is (main path applies bn1 at its start)
+            x.clone()
         };
-        let h = self.conv2.forward(h) + skip_h;
+
+        // Main path: bn1 → relu → conv1
+        let mut h = self.bn1.forward(x);
+        h = self.relu.forward(h);
+        h = self.conv1.forward(h);
+
+        // Main path: bn2 → relu → conv2
+        h = self.bn2.forward(h);
+        h = self.relu.forward(h);
+        h = self.conv2.forward(h);
+
+        // Add skip + final relu
+        let h = h + skip_h;
         self.relu.forward(h)
     }
 }

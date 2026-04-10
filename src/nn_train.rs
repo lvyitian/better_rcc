@@ -124,7 +124,11 @@ pub mod nn_train {
                     };
                     break;
                 }
-                if board.is_repetition_violation().is_some() {
+                if let Some(winner) = board.is_repetition_violation() {
+                    outcome = match winner {
+                        Color::Red => 1.0,
+                        Color::Black => -1.0,
+                    };
                     break;
                 }
 
@@ -478,7 +482,11 @@ pub mod nn_train {
                     };
                     break;
                 }
-                if board.is_repetition_violation().is_some() {
+                if let Some(winner) = board.is_repetition_violation() {
+                    outcome = match winner {
+                        Color::Red => 1.0,
+                        Color::Black => -1.0,
+                    };
                     break;
                 }
 
