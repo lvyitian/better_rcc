@@ -135,6 +135,38 @@ impl InputPlanes {
         ndarray::Array4::from_shape_vec((1, 38, 9, 10), self.data.to_vec())
             .expect("InputPlanes shape [1, 38, 9, 10] is always valid")
     }
+
+    /// Create from flat data.
+    pub fn from_flat(data: Vec<f32>) -> Self {
+        let mut arr = [0.0f32; 3420];
+        arr.copy_from_slice(&data);
+        Self { data: arr }
+    }
+
+    /// Convert to flat Vec.
+    pub fn into_vec(self) -> Vec<f32> {
+        self.data.to_vec()
+    }
+
+    /// Return reference to flat plane data for training data export.
+    pub fn planes_data(&self) -> &[f32; 3420] {
+        &self.data
+    }
+
+    /// Return flat plane data as Vec for serialization.
+    pub fn planes_vec(&self) -> Vec<f32> {
+        self.data.to_vec()
+    }
+
+    /// Convert to burn Tensor for training.
+    #[cfg(feature = "train")]
+    pub fn to_burn_tensor<B: Backend>(&self) -> Tensor<B, 4> {
+        use burn::tensor::TensorData;
+        let device = <B as Backend>::Device::default();
+        let data = TensorData::from(self.data);
+        let flat: Tensor<B, 1> = Tensor::from_data(data, &device);
+        flat.reshape([1, 38, 9, 10])
+    }
 }
 
 // =============================================================================
