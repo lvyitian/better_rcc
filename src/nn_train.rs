@@ -83,4 +83,69 @@ pub mod nn_train {
         }
         Ok(samples)
     }
+
+    /// Self-play game collector for training data.
+    pub struct SelfPlayCollector {
+        samples: Vec<TrainingSample>,
+        max_depth: u8,
+    }
+
+    impl SelfPlayCollector {
+        pub fn new(max_depth: u8) -> Self {
+            Self {
+                samples: Vec::new(),
+                max_depth,
+            }
+        }
+
+        /// Run one self-play game, collecting positions with scores.
+        /// Returns game outcome: +1.0 (Red wins), 0.0 (draw), -1.0 (Black wins).
+        pub fn run_game(&mut self, rule_set: crate::RuleSet, order: u8) -> f32 {
+            use crate::search;
+            use crate::eval::eval::handcrafted_evaluate;
+
+            let mut board = Board::new(rule_set, order);
+            let mut outcome = 0.0f32; // draw default
+
+            loop {
+                // Check game over
+                if let Some(winner) = board.get_winner() {
+                    outcome = match winner {
+                        Color::Red => 1.0,
+                        Color::Black => -1.0,
+                    };
+                    break;
+                }
+                if board.is_repetition_violation().is_some() {
+                    break;
+                }
+
+                // Collect position before move
+                let side = board.current_side;
+                let score = search::find_best_move(&mut board, self.max_depth, side)
+                    .map(|_| {
+                        // Use handcrafted eval as proxy score for supervised training
+                        handcrafted_evaluate(&board, side, false) as f32
+                    })
+                    .unwrap_or(0.0);
+
+                // Store sample with position before the move
+                let sample = TrainingSample::from_board(&board, side, score as i32);
+                self.samples.push(sample);
+
+                // Make a move
+                if let Some(action) = search::find_best_move(&mut board, self.max_depth, side) {
+                    board.make_move(action);
+                } else {
+                    break;
+                }
+            }
+
+            outcome
+        }
+
+        pub fn into_samples(self) -> Vec<TrainingSample> {
+            self.samples
+        }
+    }
 }
