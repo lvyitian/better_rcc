@@ -11,3 +11,36 @@ bincode = "1.3"
 
 [dev-dependencies]
 rand = "0.8"
+
+[dependencies.burn]
+version = "0.21.0-pre.3"
+optional = true
+
+[dependencies.burn-ndarray]
+version = "0.21.0-pre.3"
+optional = true
+
+[dependencies.burn-autodiff]
+version = "0.21.0-pre.3"
+optional = true
+
+[dependencies.burn-nn]
+version = "0.21.0-pre.3"
+optional = true
+
+[dependencies.burn-optim]
+version = "0.21.0-pre.3"
+optional = true
+
+[dependencies.burn-derive]
+version = "0.21.0-pre.3"
+optional = true
+
+[features]
+train = ["dep:burn", "dep:burn-ndarray", "dep:burn-autodiff", "dep:burn-nn", "dep:burn-optim", "dep:burn-derive"]
+burn = []
+burn-ndarray = ["burn"]
+burn-autodiff = ["burn"]
+burn-nn = ["burn"]
+burn-optim = ["burn"]
+burn-derive = ["burn"]
