@@ -98,7 +98,9 @@ impl InputPlanes {
         }
 
         // Plane 29: game phase (0=opening, 1=endgame)
-        let phase = (game_phase(board) as f32 / 82.0f32).min(1.0).max(0.0);
+        // game_phase returns 0 (all pieces gone=endgame) to 82 (full=opening)
+        // Invert so that 0=opening and 1=endgame
+        let phase = 1.0 - (game_phase(board) as f32 / 82.0f32).min(1.0).max(0.0);
         for i in 0..90 { data[29 * 90 + i] = phase; }
 
         // Plane 30: repetition count (0-3+ normalized to 0-1)
