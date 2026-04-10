@@ -402,11 +402,40 @@ pub struct NNOutput {
     pub correction: f32,
 }
 
+/// Global NN instance, lazily initialized.
+static NN_NET: std::sync::LazyLock<CompactResNet> =
+    std::sync::LazyLock::new(CompactResNet::new);
+
+/// Hybrid NN + handcrafted evaluation.
+///
+/// Blending formula (per spec):
+///   final_score = (alpha / (alpha + beta)) * nn_score
+///               + (beta / (alpha + beta)) * handcrafted_score
+///               + correction * scale
+///
+/// Where alpha, beta ∈ [0.05, 0.95] (sigmoid-clamped), nn_score ∈ [-300, 300],
+/// correction ∈ [-300, 300], handcrafted_score is in centipawns.
 #[allow(dead_code)]
 pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) -> i32 {
-    // For now, just call the handcrafted evaluation
-    // TODO: Replace with NN inference when model is loaded
-    handcrafted_evaluate(board, side, initiative)
+    let handcrafted = handcrafted_evaluate(board, side, initiative);
+
+    let input = InputPlanes::from_board(board, side);
+    let output = NN_NET.forward(&input);
+
+    // Normalize alpha + beta to sum to 1 (with minimum floor of 0.05)
+    let alpha = output.alpha.max(0.05);
+    let beta = output.beta.max(0.05);
+    let total = alpha + beta;
+    let alpha_norm = alpha / total;
+    let beta_norm = beta / total;
+
+    // NN outputs already scaled to centipawns
+    let nn_score = output.nn_score;
+    // Correction is in [-300, 300] range, use as additive centipawn offset
+    let correction = output.correction;
+
+    let blended = alpha_norm * nn_score + beta_norm * handcrafted as f32 + correction;
+    blended as i32
 }
 
 // =============================================================================
