@@ -445,6 +445,8 @@ pub struct ResBlock<B: Backend> {
     pub bn2: BatchNorm<B>,
     /// Optional 1×1 conv for channel change in skip connection.
     pub skip_conv: Option<burn::nn::conv::Conv2d<B>>,
+    /// Optional 1×1 conv to expand channels before bn1 when in_ch != out_ch.
+    pub expand_conv: Option<burn::nn::conv::Conv2d<B>>,
     pub relu: Relu,
 }
 
@@ -482,7 +484,18 @@ impl<B: Backend> ResBlock<B> {
             None
         };
 
-        Self { conv1, bn1, conv2, bn2, skip_conv, relu: Relu::new() }
+        // Expand conv: 1x1 conv to expand channels before bn1 when in_ch != out_ch.
+        // This ensures bn1 (configured with out_ch) receives a tensor with out_ch channels.
+        let expand_conv = if in_ch != out_ch {
+            Some(burn::nn::conv::Conv2dConfig::new([in_ch, out_ch], [1, 1])
+                .with_padding(PaddingConfig2d::Valid)
+                .with_bias(true)
+                .init(&device))
+        } else {
+            None
+        };
+
+        Self { conv1, bn1, conv2, bn2, skip_conv, expand_conv, relu: Relu::new() }
     }
 
     pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
@@ -498,8 +511,15 @@ impl<B: Backend> ResBlock<B> {
             x.clone()
         };
 
-        // Main path: bn1 → relu → conv1
-        let mut h = self.bn1.forward(x);
+        // Main path: expand channels (if needed) → bn1 → relu → conv1
+        // When in_ch != out_ch, expand_conv expands x to out_ch channels BEFORE bn1,
+        // ensuring bn1 (configured with out_ch) receives a tensor with matching channels.
+        let h = if let Some(ref ec) = self.expand_conv {
+            ec.forward(x)
+        } else {
+            x
+        };
+        let mut h = self.bn1.forward(h);
         h = self.relu.forward(h);
         h = self.conv1.forward(h);
 
