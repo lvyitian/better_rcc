@@ -433,10 +433,10 @@ impl Default for CompactResNet {
 #[cfg(feature = "train")]
 #[derive(Module, Debug)]
 pub struct ResBlock<B: Backend> {
-    conv1: burn::nn::conv::Conv2d<B>,
-    conv2: burn::nn::conv::Conv2d<B>,
-    skip: Option<burn::nn::conv::Conv2d<B>>,
-    relu: Relu,
+    pub conv1: burn::nn::conv::Conv2d<B>,
+    pub conv2: burn::nn::conv::Conv2d<B>,
+    pub skip: Option<burn::nn::conv::Conv2d<B>>,
+    pub relu: Relu,
 }
 
 #[cfg(feature = "train")]
@@ -464,7 +464,7 @@ impl<B: Backend> ResBlock<B> {
         Self { conv1, conv2, skip, relu: Relu::new() }
     }
 
-    fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+    pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
         let x2 = x.clone();
         let h = self.relu.forward(self.conv1.forward(x));
         let skip_h = if let Some(ref skip_conv) = self.skip {
@@ -481,19 +481,19 @@ impl<B: Backend> ResBlock<B> {
 #[cfg(feature = "train")]
 #[derive(Module, Debug)]
 pub struct CompactResNetBurn<B: Backend = burn_ndarray::NdArray<f32>> {
-    init_conv: burn::nn::conv::Conv2d<B>,
-    b1: ResBlock<B>,
-    b2: ResBlock<B>,
-    b3: ResBlock<B>,
-    b4: ResBlock<B>,
-    b5: ResBlock<B>,
-    b6: ResBlock<B>,
-    dense: burn::nn::Linear<B>,
-    alpha_head: burn::nn::Linear<B>,
-    beta_head: burn::nn::Linear<B>,
-    score_head: burn::nn::Linear<B>,
-    correction_head: burn::nn::Linear<B>,
-    relu: Relu,
+    pub init_conv: burn::nn::conv::Conv2d<B>,
+    pub b1: ResBlock<B>,
+    pub b2: ResBlock<B>,
+    pub b3: ResBlock<B>,
+    pub b4: ResBlock<B>,
+    pub b5: ResBlock<B>,
+    pub b6: ResBlock<B>,
+    pub dense: burn::nn::Linear<B>,
+    pub alpha_head: burn::nn::Linear<B>,
+    pub beta_head: burn::nn::Linear<B>,
+    pub score_head: burn::nn::Linear<B>,
+    pub correction_head: burn::nn::Linear<B>,
+    pub relu: Relu,
 }
 
 #[cfg(feature = "train")]

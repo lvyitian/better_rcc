@@ -6,7 +6,16 @@ pub mod nn_train {
     use bincode;
     use serde::{Deserialize, Serialize};
     use crate::eval::{Board, Color};
-    use crate::nn_eval::InputPlanes;
+    use crate::nn_eval::{InputPlanes, CompactResNetBurn, NNOutput};
+    use burn::optim::AdamW;
+    use burn::prelude::*;
+    use burn_ndarray::NdArray;
+    use burn_autodiff::Autodiff;
+
+    /// Training backend: Autodiff wrapping NdArray for gradient computation.
+    pub type TrainBackend = Autodiff<NdArray<f32>>;
+    /// Inference backend: plain NdArray.
+    pub type InferenceBackend = NdArray<f32>;
 
     /// A single training sample: flat input planes + label + side to move.
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,5 +156,84 @@ pub mod nn_train {
         pub fn into_samples(self) -> Vec<TrainingSample> {
             self.samples
         }
+    }
+
+    /// Phase 1: Supervised pretraining — MSE on score head only.
+    ///
+    /// Uses burn autodiff backend for gradient computation.
+    /// The alpha/beta heads are frozen (no gradient) during this phase.
+    ///
+    /// **NOTE:** This is a simplified placeholder. Full training requires
+    /// proper burn autodiff integration with `require_grad()` and `backward()`
+    /// on a loss tensor. The actual implementation is pending.
+    pub fn train_supervised(
+        _net: &mut CompactResNetBurn<TrainBackend>,
+        train_data: &[TrainingSample],
+        _val_data: &[TrainingSample],
+        epochs: usize,
+        batch_size: usize,
+        _lr: f64,
+    ) {
+        eprintln!("Starting supervised training: {} train samples, {} epochs, batch={}",
+                 train_data.len(), epochs, batch_size);
+        eprintln!("NOTE: Full burn autodiff training loop pending implementation.");
+        eprintln!("Self-play data collection via SelfPlayCollector::run_game() is working.");
+
+        // TODO: Full training requires:
+        // 1. Create tensors with .require_grad()
+        // 2. Forward pass through the network
+        // 3. Compute MSE loss on score head
+        // 4. Call loss.backward() for gradients
+        // 5. Use AdamW optimizer to update weights
+        // For now, this is a placeholder that validates the data pipeline.
+
+        for epoch in 0..epochs {
+            let num_batches = (train_data.len() + batch_size - 1) / batch_size;
+            for batch_idx in 0..num_batches {
+                let start = batch_idx * batch_size;
+                let end = (start + batch_size).min(train_data.len());
+                eprintln!("  Epoch {} batch {}/{}: {}-{} samples",
+                         epoch, batch_idx, num_batches, start, end);
+            }
+        }
+    }
+
+    /// Compute validation loss on a trained network.
+    /// Returns MSE between predicted nn_score and labels.
+    pub fn compute_val_loss(net: &mut CompactResNetBurn<TrainBackend>, val_data: &[TrainingSample]) -> f32 {
+        use burn::tensor::Tensor;
+        let device = <TrainBackend as Backend>::Device::default();
+        let mut total_loss = 0.0f32;
+
+        for sample in val_data {
+            let arr: [f32; 3420] = {
+                let mut a = [0.0f32; 3420];
+                a.copy_from_slice(&sample.planes);
+                a
+            };
+            let flat: Tensor<TrainBackend, 1> = Tensor::from_data(TensorData::from(arr), &device);
+            let input: Tensor<TrainBackend, 4> = flat.reshape([1, 38, 9, 10]);
+
+            // Forward pass through the network
+            let x = net.init_conv.forward(input);
+            let x = net.relu.forward(x);
+            let x = net.b1.forward(x);
+            let x = net.b2.forward(x);
+            let x = net.b3.forward(x);
+            let x = net.b4.forward(x);
+            let x = net.b5.forward(x);
+            let x = net.b6.forward(x);
+            let pooled = x.mean_dim(3).mean_dim(2).reshape([1, 64]);
+            let dense_out = net.relu.forward(net.dense.forward(pooled));
+            let score_out = net.score_head.forward(dense_out);
+
+            // Extract scalar from [1, 1] tensor
+            let score_raw: f32 = score_out.to_data().as_slice().expect("expected 1x1")[0];
+            let nn_score = score_raw.tanh() * 300.0;
+
+            let loss = (nn_score / 300.0 - sample.label).powi(2);
+            total_loss += loss;
+        }
+        total_loss / val_data.len() as f32
     }
 }
