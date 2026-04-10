@@ -18,7 +18,7 @@ use crate::{
     MATE_SCORE, CHECK_BONUS,
 };
 
-pub mod eval {
+pub mod eval_impl {
     use super::*;
     use smallvec::SmallVec;
 

@@ -2348,7 +2348,7 @@ mod nn_train;
 pub mod search {
         use super::*;
         use crate::evaluate;
-        use crate::eval::eval::game_phase;
+        use crate::eval::eval_impl::game_phase;
         use movegen::*;
         use super::book::OpeningBook;
 
@@ -3384,7 +3384,7 @@ fn run_one_game(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dyn std
 /// Interactive training menu (behind `#[cfg(feature = "train")]`.
 #[cfg(feature = "train")]
 fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dyn std::error::Error>> {
-    use nn_train::nn_train::*;
+    use nn_train::nn_train_impl::*;
     use crate::nn_eval::CompactResNetBurn;
 
     loop {
@@ -3616,6 +3616,16 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
     }
 
     Ok(())
+}
+
+// =============================================================================
+// EVALUATION DISPATCH
+// =============================================================================
+
+/// Main evaluation entry point. Currently dispatches to handcrafted evaluation.
+/// In the future, this will route to the neural network when available.
+pub fn evaluate(board: &Board, side: Color, initiative: bool) -> i32 {
+    nn_eval::nn_evaluate_or_handcrafted(board, side, initiative)
 }
 
 // =============================================================================
@@ -7343,14 +7353,4 @@ mod tests {
             board.make_move(chosen);
         }
     }
-}
-
-// =============================================================================
-// EVALUATION DISPATCH
-// =============================================================================
-
-/// Main evaluation entry point. Currently dispatches to handcrafted evaluation.
-/// In the future, this will route to the neural network when available.
-pub fn evaluate(board: &Board, side: Color, initiative: bool) -> i32 {
-    nn_eval::nn_evaluate_or_handcrafted(board, side, initiative)
 }

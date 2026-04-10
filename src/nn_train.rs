@@ -2,7 +2,7 @@
 //! Behind `#[cfg(feature = "train")]`.
 
 #[cfg(feature = "train")]
-pub mod nn_train {
+pub mod nn_train_impl {
     use bincode;
     use serde::{Deserialize, Serialize};
     use crate::eval::{Board, Color};
@@ -13,8 +13,6 @@ pub mod nn_train {
 
     /// Training backend: Autodiff wrapping NdArray for gradient computation.
     pub type TrainBackend = Autodiff<NdArray<f32>>;
-    /// Inference backend: plain NdArray.
-    pub type InferenceBackend = NdArray<f32>;
 
     /// A single training sample: flat input planes + label + side to move.
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,7 +42,8 @@ pub mod nn_train {
             }
         }
 
-        /// Reconstruct InputPlanes from this sample.
+        /// Convert TrainingSample planes back to InputPlanes.
+        #[allow(dead_code)]
         pub fn to_input_planes(&self) -> InputPlanes {
             InputPlanes::from_flat(self.planes.clone())
         }
@@ -110,7 +109,7 @@ pub mod nn_train {
         /// Returns game outcome: +1.0 (Red wins), 0.0 (draw), -1.0 (Black wins).
         pub fn run_game(&mut self, rule_set: crate::RuleSet, order: u8) -> f32 {
             use crate::search;
-            use crate::eval::eval::handcrafted_evaluate;
+            use crate::eval::eval_impl::handcrafted_evaluate;
 
             let mut board = Board::new(rule_set, order);
             let mut outcome = 0.0f32; // draw default
@@ -188,7 +187,7 @@ pub mod nn_train {
 
         for epoch in 0..epochs {
             let mut epoch_loss = 0.0f32;
-            let num_batches = (train_data.len() + batch_size - 1) / batch_size;
+            let num_batches = train_data.len().div_ceil(batch_size);
 
             for batch_idx in 0..num_batches {
                 let start = batch_idx * batch_size;
@@ -299,8 +298,8 @@ pub mod nn_train {
     /// Save network weights to a binary file using burn's CompactRecorder.
     pub fn save_network(net: &CompactResNetBurn<TrainBackend>, path: &str) -> std::io::Result<()> {
         use burn::record::CompactRecorder;
-        (&*net).clone().save_file(path, &mut CompactRecorder::new())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        (*net).clone().save_file(path, &CompactRecorder::new())
+            .map_err(std::io::Error::other)
     }
 
     /// Load network weights from a binary file.
@@ -310,7 +309,7 @@ pub mod nn_train {
         let device = <TrainBackend as Backend>::Device::default();
         let record = CompactRecorder::new()
             .load(path.into(), &device)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         let net = CompactResNetBurn::new();
         Ok(net.load_record(record))
     }
@@ -346,7 +345,7 @@ pub mod nn_train {
 
         for epoch in 0..epochs {
             let mut epoch_loss = 0.0f32;
-            let num_batches = (train_data.len() + batch_size - 1) / batch_size;
+            let num_batches = train_data.len().div_ceil(batch_size);
 
             for batch_idx in 0..num_batches {
                 let start = batch_idx * batch_size;
@@ -412,13 +411,13 @@ pub mod nn_train {
 
                     // BCE on alpha/beta heads (target is binary: 1=Red win, 0=Black win, 0.5=draw)
                     let bce_alpha: f32 = {
-                        let p = alpha.max(1e-15_f32).min(1.0 - 1e-15_f32);
-                        let q = outcome_bin.max(1e-15_f32).min(1.0 - 1e-15_f32);
+                        let p = alpha.clamp(1e-15_f32, 1.0 - 1e-15_f32);
+                        let q = outcome_bin.clamp(1e-15_f32, 1.0 - 1e-15_f32);
                         -q * p.ln() - (1.0 - q) * (1.0 - p).ln()
                     };
                     let bce_beta: f32 = {
-                        let p = beta.max(1e-15_f32).min(1.0 - 1e-15_f32);
-                        let q = outcome_bin.max(1e-15_f32).min(1.0 - 1e-15_f32);
+                        let p = beta.clamp(1e-15_f32, 1.0 - 1e-15_f32);
+                        let q = outcome_bin.clamp(1e-15_f32, 1.0 - 1e-15_f32);
                         -q * p.ln() - (1.0 - q) * (1.0 - p).ln()
                     };
 

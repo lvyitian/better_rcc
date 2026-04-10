@@ -41,7 +41,21 @@
       "WebFetch(domain:github.com)",
       "Bash(gh search:*)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "mcp__plugin_context7_context7__resolve-library-id"
+      "mcp__plugin_context7_context7__resolve-library-id",
+      "mcp__plugin_context7_context7__query-docs",
+      "WebFetch(domain:crates.io)",
+      "Bash(cargo doc:*)",
+      "Bash(xargs grep:*)",
+      "WebFetch(domain:docs.rs)",
+      "Bash(git commit -m 'feat: rewrite CompactResNet with burn Module:*)",
+      "Bash(git commit -m 'feat\\(nn\\): add TrainingSample, tensor conversion, nn_train.rs stub:*)",
+      "Bash(git commit -m 'feat\\(nn\\): add SelfPlayCollector for position data:*)",
+      "Bash(git commit -m 'chore: add nn_weights.bin and data/ to .gitignore:*)",
+      "Bash(git commit -m 'feat\\(nn\\): add training pipeline placeholder and training loop:*)",
+      "Bash(python3:*)",
+      "Bash(grep -r \"pub struct BatchNorm\" ~/.cargo/registry/src/*/burn-0.21.0-pre.3/src/)",
+      "Bash(grep:*)",
+      "Bash(mkdir:*)"
     ]
   }
 }

@@ -4,7 +4,7 @@
 use crate::{Board, Color, PieceType};
 #[allow(unused_imports)]
 use crate::RuleSet;
-use crate::eval::eval::{handcrafted_evaluate, game_phase};
+use crate::eval::eval_impl::{handcrafted_evaluate, game_phase};
 use ndarray::{Array4, Array3, Array2, Array1};
 
 #[cfg(feature = "train")]
@@ -50,14 +50,14 @@ impl InputPlanes {
 
                     let base = our_base;
                     let plane = match piece.piece_type {
-                        PieceType::King => base + 0,
+                        PieceType::King => base,
                         PieceType::Advisor => {
                             let idx = if piece.color == Color::Red {
                                 let i = red_advisors; red_advisors += 1; i
                             } else {
                                 let i = black_advisors; black_advisors += 1; i
                             };
-                            base + 1 + idx.min(1) as usize
+                            base + 1 + idx.min(1)
                         }
                         PieceType::Elephant => {
                             let idx = if piece.color == Color::Red {
@@ -65,7 +65,7 @@ impl InputPlanes {
                             } else {
                                 let i = black_elephants; black_elephants += 1; i
                             };
-                            base + 3 + idx.min(1) as usize
+                            base + 3 + idx.min(1)
                         }
                         PieceType::Horse => {
                             let idx = if piece.color == Color::Red {
@@ -73,7 +73,7 @@ impl InputPlanes {
                             } else {
                                 let i = black_horses; black_horses += 1; i
                             };
-                            base + 5 + idx.min(1) as usize
+                            base + 5 + idx.min(1)
                         }
                         PieceType::Cannon => {
                             let idx = if piece.color == Color::Red {
@@ -81,11 +81,11 @@ impl InputPlanes {
                             } else {
                                 let i = black_cannons; black_cannons += 1; i
                             };
-                            base + 7 + idx.min(1) as usize
+                            base + 7 + idx.min(1)
                         }
                         PieceType::Pawn => {
                             // 5 pawns on files 0-4 (left to right)
-                            let file = (x as usize).min(4);
+                            let file = x.min(4);
                             base + 9 + file
                         }
                         PieceType::Chariot => {
@@ -107,7 +107,7 @@ impl InputPlanes {
         // Plane 29: game phase (0=opening, 1=endgame)
         // game_phase returns 0 (all pieces gone=endgame) to 82 (full=opening)
         // Invert so that 0=opening and 1=endgame
-        let phase = 1.0 - (game_phase(board) as f32 / 82.0f32).min(1.0).max(0.0);
+        let phase = 1.0 - (game_phase(board) as f32 / 82.0f32).clamp(0.0, 1.0);
         for i in 0..90 { data[29 * 90 + i] = phase; }
 
         // Plane 30: repetition count (0-3+ normalized to 0-1)
@@ -137,6 +137,7 @@ impl InputPlanes {
     }
 
     /// Create from flat data.
+    #[allow(dead_code)]
     pub fn from_flat(data: Vec<f32>) -> Self {
         let mut arr = [0.0f32; 3420];
         arr.copy_from_slice(&data);
@@ -144,22 +145,26 @@ impl InputPlanes {
     }
 
     /// Convert to flat Vec.
+    #[allow(dead_code)]
     pub fn into_vec(self) -> Vec<f32> {
         self.data.to_vec()
     }
 
     /// Return reference to flat plane data for training data export.
+    #[allow(dead_code)]
     pub fn planes_data(&self) -> &[f32; 3420] {
         &self.data
     }
 
     /// Return flat plane data as Vec for serialization.
+    #[allow(dead_code)]
     pub fn planes_vec(&self) -> Vec<f32> {
         self.data.to_vec()
     }
 
     /// Convert to burn Tensor for training.
     #[cfg(feature = "train")]
+    #[allow(dead_code)]
     pub fn to_burn_tensor<B: Backend>(&self) -> Tensor<B, 4> {
         use burn::tensor::TensorData;
         let device = <B as Backend>::Device::default();
@@ -504,7 +509,7 @@ impl<B: Backend> ResBlock<B> {
         h = self.conv2.forward(h);
 
         // Final add + relu
-        let mut h = h + skip_h;
+        let h = h + skip_h;
         self.relu.forward(h)
     }
 }
@@ -690,8 +695,8 @@ mod tests {
         let board = Board::new(RuleSet::Official, 1);
         let planes = InputPlanes::from_board(&board, Color::Red);
         // Verify all 3420 values are in valid range [0, 1]
-        for &v in &planes.data {
-            assert!(v >= 0.0 && v <= 1.0, "plane value {} out of range [0,1]", v);
+        for v in &planes.data {
+            assert!((0.0..=1.0).contains(v), "plane value {} out of range [0,1]", v);
         }
     }
 
