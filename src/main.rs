@@ -3226,6 +3226,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stdin = io::stdin();
     let mut input = String::new();
 
+    loop {
+        println!("\n=== 主菜单 ===");
+        println!("1. 开始游戏");
+        println!("2. 训练模式");
+        println!("3. 退出");
+        print!("请选择（1-3）：");
+        io::stdout().flush()?;
+
+        input.clear();
+        stdin.read_line(&mut input)?;
+        let choice = input.trim().parse::<u8>().unwrap_or(0);
+
+        match choice {
+            1 => run_one_game(&stdin, &mut input)?,
+            #[cfg(feature = "train")]
+            2 => run_training_menu(&stdin, &mut input)?,
+            #[cfg(not(feature = "train"))]
+            2 => {
+                println!("训练功能需要启用 `train` 特性重新编译：cargo build --features train");
+            }
+            3 => break,
+            _ => {
+                println!("无效选择！");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Run one interactive game session (rule + turn selection → game loop).
+fn run_one_game(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n【规则选择】");
     println!("1. {}", RuleSet::Official.description());
     println!("2. {}", RuleSet::OnlyLongCheckIllegal.description());
@@ -3234,7 +3266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     io::stdout().flush()?;
 
     input.clear();
-    stdin.read_line(&mut input)?;
+    stdin.read_line(input)?;
     let rule_set = match input.trim().parse::<u8>().unwrap_or(1) {
         1 => RuleSet::Official,
         2 => RuleSet::OnlyLongCheckIllegal,
@@ -3250,7 +3282,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     io::stdout().flush()?;
 
     input.clear();
-    stdin.read_line(&mut input)?;
+    stdin.read_line(input)?;
     let order = input.trim().parse::<u8>().unwrap_or(2);
     if !(1..=2).contains(&order) {
         return Err("无效的顺序编号".into());
@@ -3276,7 +3308,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         'input_loop: loop {
             println!("\n请输入你的走法 (格式: x1 y1 x2 y2)：");
             input.clear();
-            stdin.read_line(&mut input)?;
+            stdin.read_line(input)?;
             let parts: Vec<&str> = input.split_whitespace().collect();
 
             if parts.len() != 4 {
@@ -3344,6 +3376,204 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         ai_turn = true;
+    }
+
+    Ok(())
+}
+
+/// Interactive training menu (behind `#[cfg(feature = "train")]`.
+#[cfg(feature = "train")]
+fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dyn std::error::Error>> {
+    use nn_train::nn_train::*;
+    use crate::nn_eval::CompactResNetBurn;
+
+    loop {
+        println!("\n【训练模式】");
+        println!("1. 自走对局收集 + 训练 (Phase 1)");
+        println!("2. 从文件加载数据训练 (Phase 1)");
+        println!("3. 继续训练 (Phase 2 自对局微调)");
+        println!("4. 导出棋谱为训练数据");
+        println!("5. 返回主菜单");
+        print!("请选择（1-5）：");
+        io::stdout().flush()?;
+
+        input.clear();
+        stdin.read_line(input)?;
+        let choice = input.trim().parse::<u8>().unwrap_or(0);
+
+        match choice {
+            1 => {
+                let num_games: usize = 1;
+                let max_depth: u8 = 4;
+                let epochs: usize = 15;
+                let batch_size: usize = 256;
+                let lr: f64 = 1e-3;
+
+                eprintln!("\n=== Phase 1: 自走对局 + 训练 ===");
+                eprintln!("游戏数量: {}, 搜索深度: {}, 轮次: {}, batch: {}, lr: {}",
+                         num_games, max_depth, epochs, batch_size, lr);
+
+                let rule_set = RuleSet::Official;
+                let order: u8 = 1;
+
+                let mut collector = SelfPlayCollector::new(max_depth);
+                for game in 0..num_games {
+                    let outcome = collector.run_game(rule_set, order);
+                    eprintln!("游戏 {}/{} 完成，结果: {} (Red={:.0}, Black={:.0})",
+                             game + 1, num_games,
+                             if outcome > 0.0 { "红胜" } else if outcome < 0.0 { "黑胜" } else { "平局" },
+                             outcome, -outcome);
+                }
+                let all_samples = collector.into_samples();
+                eprintln!("共收集 {} 个局面", all_samples.len());
+
+                if all_samples.is_empty() {
+                    eprintln!("错误：没有收集到任何局面！");
+                    continue;
+                }
+
+                let split = (all_samples.len() * 9) / 10;
+                let train_samples = &all_samples[..split];
+                let val_samples = &all_samples[split..];
+                eprintln!("训练集: {}, 验证集: {}", train_samples.len(), val_samples.len());
+
+                let mut net = CompactResNetBurn::<TrainBackend>::new();
+                train_supervised(&mut net, train_samples, val_samples, epochs, batch_size, lr);
+
+                let path = "nn_weights.bin";
+                if let Err(e) = save_network(&net, path) {
+                    eprintln!("保存权重失败: {}", e);
+                } else {
+                    eprintln!("权重已保存到 {}", path);
+                }
+            }
+            2 => {
+                println!("\n请输入训练数据文件路径：");
+                input.clear();
+                stdin.read_line(input)?;
+                let path = input.trim();
+                if path.is_empty() {
+                    println!("无效路径！");
+                    continue;
+                }
+
+                let samples = match load_training_data(path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("加载失败: {}", e);
+                        continue;
+                    }
+                };
+                eprintln!("已加载 {} 个局面", samples.len());
+
+                let epochs: usize = 15;
+                let batch_size: usize = 256;
+                let lr: f64 = 1e-3;
+
+                let split = (samples.len() * 9) / 10;
+                let train_samples = &samples[..split];
+                let val_samples = &samples[split..];
+                eprintln!("训练集: {}, 验证集: {}", train_samples.len(), val_samples.len());
+
+                let mut net = CompactResNetBurn::<TrainBackend>::new();
+                train_supervised(&mut net, train_samples, val_samples, epochs, batch_size, lr);
+
+                let save_path = "nn_weights.bin";
+                if let Err(e) = save_network(&net, save_path) {
+                    eprintln!("保存权重失败: {}", e);
+                } else {
+                    eprintln!("权重已保存到 {}", save_path);
+                }
+            }
+            3 => {
+                let path = "nn_weights.bin";
+                let mut net = match load_network(path) {
+                    Ok(n) => {
+                        eprintln!("已加载现有权重 from {}", path);
+                        n
+                    }
+                    Err(e) => {
+                        eprintln!("加载权重失败：{}，将重新开始训练", e);
+                        CompactResNetBurn::<TrainBackend>::new()
+                    }
+                };
+
+                let num_games: usize = 1;
+                let max_depth: u8 = 4;
+                let epochs: usize = 5;
+                let batch_size: usize = 256;
+                let lr: f64 = 5e-4;
+
+                eprintln!("\n=== Phase 2: 自对局微调 ===");
+                eprintln!("游戏数量: {}, 搜索深度: {}, 轮次: {}, batch: {}, lr: {}",
+                         num_games, max_depth, epochs, batch_size, lr);
+
+                let rule_set = RuleSet::Official;
+                let order: u8 = 1;
+
+                let mut collector = SelfPlayOutcomeCollector::new(max_depth);
+                for game in 0..num_games {
+                    let outcome = collector.run_game(rule_set, order);
+                    eprintln!("游戏 {}/{} 完成，结果: {}",
+                             game + 1, num_games,
+                             if outcome > 0.0 { "红胜" } else if outcome < 0.0 { "黑胜" } else { "平局" });
+                }
+                let all_samples = collector.into_samples();
+                eprintln!("共收集 {} 个局面", all_samples.len());
+
+                if all_samples.is_empty() {
+                    eprintln!("错误：没有收集到任何局面！");
+                    continue;
+                }
+
+                let split = (all_samples.len() * 9) / 10;
+                let train_samples = &all_samples[..split];
+                let val_samples = &all_samples[split..];
+
+                train_selfplay(&mut net, train_samples, val_samples, epochs, batch_size, lr);
+
+                if let Err(e) = save_network(&net, path) {
+                    eprintln!("保存权重失败: {}", e);
+                } else {
+                    eprintln!("权重已保存到 {}", path);
+                }
+            }
+            4 => {
+                println!("\n请输入导出文件路径：");
+                input.clear();
+                stdin.read_line(input)?;
+                let path = input.trim();
+                if path.is_empty() {
+                    println!("无效路径！");
+                    continue;
+                }
+
+                let num_games: usize = 1;
+                let max_depth: u8 = 4;
+                let rule_set = RuleSet::Official;
+                let order: u8 = 1;
+
+                let mut collector = SelfPlayCollector::new(max_depth);
+                for game in 0..num_games {
+                    let outcome = collector.run_game(rule_set, order);
+                    eprintln!("游戏 {}/{} 完成，结果: {}",
+                             game + 1, num_games,
+                             if outcome > 0.0 { "红胜" } else if outcome < 0.0 { "黑胜" } else { "平局" });
+                }
+                let samples = collector.into_samples();
+                eprintln!("共收集 {} 个局面，导出到 {}", samples.len(), path);
+
+                if let Err(e) = save_training_data(&samples, path) {
+                    eprintln!("导出失败: {}", e);
+                } else {
+                    eprintln!("导出成功！");
+                }
+            }
+            5 => break,
+            _ => {
+                println!("无效选择！");
+            }
+        }
     }
 
     Ok(())

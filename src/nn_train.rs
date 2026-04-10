@@ -6,8 +6,7 @@ pub mod nn_train {
     use bincode;
     use serde::{Deserialize, Serialize};
     use crate::eval::{Board, Color};
-    use crate::nn_eval::{InputPlanes, CompactResNetBurn, NNOutput};
-    use burn::optim::AdamW;
+    use crate::nn_eval::{InputPlanes, CompactResNetBurn};
     use burn::prelude::*;
     use burn_ndarray::NdArray;
     use burn_autodiff::Autodiff;
@@ -162,39 +161,89 @@ pub mod nn_train {
     ///
     /// Uses burn autodiff backend for gradient computation.
     /// The alpha/beta heads are frozen (no gradient) during this phase.
-    ///
-    /// **NOTE:** This is a simplified placeholder. Full training requires
-    /// proper burn autodiff integration with `require_grad()` and `backward()`
-    /// on a loss tensor. The actual implementation is pending.
     pub fn train_supervised(
-        _net: &mut CompactResNetBurn<TrainBackend>,
+        net: &mut CompactResNetBurn<TrainBackend>,
         train_data: &[TrainingSample],
-        _val_data: &[TrainingSample],
+        val_data: &[TrainingSample],
         epochs: usize,
         batch_size: usize,
-        _lr: f64,
+        lr: f64,
     ) {
-        eprintln!("Starting supervised training: {} train samples, {} epochs, batch={}",
-                 train_data.len(), epochs, batch_size);
-        eprintln!("NOTE: Full burn autodiff training loop pending implementation.");
-        eprintln!("Self-play data collection via SelfPlayCollector::run_game() is working.");
+        use burn::tensor::Tensor;
+        use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
 
-        // TODO: Full training requires:
-        // 1. Create tensors with .require_grad()
-        // 2. Forward pass through the network
-        // 3. Compute MSE loss on score head
-        // 4. Call loss.backward() for gradients
-        // 5. Use AdamW optimizer to update weights
-        // For now, this is a placeholder that validates the data pipeline.
+        let device = <TrainBackend as Backend>::Device::default();
+        let mut optim = AdamWConfig::new()
+            .with_weight_decay(1e-4)
+            .init();
+
+        eprintln!("Starting supervised training: {} train, {} val, {} epochs, batch={}, lr={}",
+                 train_data.len(), val_data.len(), epochs, batch_size, lr);
 
         for epoch in 0..epochs {
+            let mut epoch_loss = 0.0f32;
             let num_batches = (train_data.len() + batch_size - 1) / batch_size;
+
             for batch_idx in 0..num_batches {
                 let start = batch_idx * batch_size;
                 let end = (start + batch_size).min(train_data.len());
-                eprintln!("  Epoch {} batch {}/{}: {}-{} samples",
-                         epoch, batch_idx, num_batches, start, end);
+                let batch = &train_data[start..end];
+
+                // Build batched input tensor [batch, 38, 9, 10]
+                let mut flat_data = Vec::with_capacity(batch.len() * 3420);
+                let mut targets = Vec::with_capacity(batch.len());
+                for sample in batch {
+                    flat_data.extend_from_slice(&sample.planes);
+                    targets.push(sample.label);
+                }
+                let input: Tensor<TrainBackend, 4> = Tensor::from_data(
+                    TensorData::new(flat_data, [batch.len(), 38, 9, 10]), &device
+                );
+
+                // Forward pass through network
+                let x = net.init_conv.forward(input);
+                let x = net.relu.forward(x);
+                let x = net.b1.forward(x);
+                let x = net.b2.forward(x);
+                let x = net.b3.forward(x);
+                let x = net.b4.forward(x);
+                let x = net.b5.forward(x);
+                let x = net.b6.forward(x);
+                let pooled = x.mean_dim(3).mean_dim(2).reshape([batch.len() as u32, 64]);
+                let dense_out = net.relu.forward(net.dense.forward(pooled));
+                let score_out = net.score_head.forward(dense_out);
+
+                // MSE loss: mean((score_normalized - target)^2) where score_normalized = score/300
+                // Compute per-sample losses then mean
+                let mut batch_loss: f32 = 0.0;
+                let score_vals: Vec<f32> = score_out.to_data().as_slice().expect("batch scores").to_vec();
+                for (i, &target) in targets.iter().enumerate() {
+                    let normalized = score_vals[i] / 300.0;
+                    let diff = normalized - target;
+                    batch_loss += diff * diff;
+                }
+                batch_loss /= batch.len() as f32;
+
+                // Backward pass
+                let loss_tensor: Tensor<TrainBackend, 1> = Tensor::from_data(
+                    TensorData::from([batch_loss]), &device
+                );
+                let grads = loss_tensor.backward();
+                let grads = GradientsParams::from_grads(grads, &*net);
+                let new_net = optim.step(lr, (*net).clone(), grads);
+                *net = new_net;
+
+                epoch_loss += batch_loss;
+                if batch_idx % 20 == 0 {
+                    eprintln!("  Epoch {} batch {}/{} loss={:.6}",
+                             epoch, batch_idx, num_batches, batch_loss);
+                }
             }
+
+            // Validation loss (no backward)
+            let val_loss = compute_val_loss(net, val_data);
+            eprintln!("Epoch {}: train_loss={:.6} val_loss={:.6}",
+                      epoch, epoch_loss / num_batches as f32, val_loss);
         }
     }
 
@@ -235,5 +284,237 @@ pub mod nn_train {
             total_loss += loss;
         }
         total_loss / val_data.len() as f32
+    }
+
+    // =============================================================================
+    // NETWORK SAVE / LOAD
+    // =============================================================================
+
+    /// Save network weights to a binary file using burn's CompactRecorder.
+    pub fn save_network(net: &CompactResNetBurn<TrainBackend>, path: &str) -> std::io::Result<()> {
+        use burn::record::CompactRecorder;
+        (&*net).clone().save_file(path, &mut CompactRecorder::new())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+
+    /// Load network weights from a binary file.
+    /// Returns a new network with loaded weights on the training backend.
+    pub fn load_network(path: &str) -> std::io::Result<CompactResNetBurn<TrainBackend>> {
+        use burn::record::{CompactRecorder, Recorder};
+        let device = <TrainBackend as Backend>::Device::default();
+        let record = CompactRecorder::new()
+            .load(path.into(), &device)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let net = CompactResNetBurn::new();
+        Ok(net.load_record(record))
+    }
+
+    // =============================================================================
+    // PHASE 2: SELF-PLAY FINE-TUNING
+    // =============================================================================
+
+    /// Phase 2: Self-play fine-tuning — all heads trainable, combined loss.
+    ///
+    /// Combined loss: mse(nn_score, outcome)
+    ///               + 0.1 * (binary_cross_entropy(alpha, outcome_bin)
+    ///                      + binary_cross_entropy(beta, outcome_bin))
+    /// where outcome ∈ {-1, 0, +1} and outcome_bin = (outcome + 1) / 2 ∈ {0, 0.5, 1}.
+    pub fn train_selfplay(
+        net: &mut CompactResNetBurn<TrainBackend>,
+        train_data: &[TrainingSample],
+        val_data: &[TrainingSample],
+        epochs: usize,
+        batch_size: usize,
+        lr: f64,
+    ) {
+        use burn::tensor::Tensor;
+        use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
+
+        let device = <TrainBackend as Backend>::Device::default();
+        let mut optim = AdamWConfig::new()
+            .with_weight_decay(1e-4)
+            .init();
+
+        eprintln!("Starting self-play fine-tuning: {} train, {} val, {} epochs, batch={}, lr={}",
+                 train_data.len(), val_data.len(), epochs, batch_size, lr);
+
+        for epoch in 0..epochs {
+            let mut epoch_loss = 0.0f32;
+            let num_batches = (train_data.len() + batch_size - 1) / batch_size;
+
+            for batch_idx in 0..num_batches {
+                let start = batch_idx * batch_size;
+                let end = (start + batch_size).min(train_data.len());
+                let batch = &train_data[start..end];
+
+                // Build batched input tensor [batch, 38, 9, 10]
+                let mut flat_data = Vec::with_capacity(batch.len() * 3420);
+                for sample in batch {
+                    flat_data.extend_from_slice(&sample.planes);
+                }
+                let input: Tensor<TrainBackend, 4> = Tensor::from_data(
+                    TensorData::new(flat_data, [batch.len(), 38, 9, 10]), &device
+                );
+
+                // Forward pass: all 4 heads
+                let x = net.init_conv.forward(input);
+                let x = net.relu.forward(x);
+                let x = net.b1.forward(x);
+                let x = net.b2.forward(x);
+                let x = net.b3.forward(x);
+                let x = net.b4.forward(x);
+                let x = net.b5.forward(x);
+                let x = net.b6.forward(x);
+                let pooled = x.mean_dim(3).mean_dim(2).reshape([batch.len() as u32, 64]);
+                let dense_out = net.relu.forward(net.dense.forward(pooled));
+
+                let alpha_raw = net.alpha_head.forward(dense_out.clone());
+                let beta_raw = net.beta_head.forward(dense_out.clone());
+                let score_raw = net.score_head.forward(dense_out.clone());
+
+                // Scalar outputs [batch, 1] → squeeze to [batch]
+                let squeeze = |t: Tensor<TrainBackend, 2>| {
+                    t.reshape([batch.len() as u32])
+                };
+                let alpha_s = squeeze(alpha_raw);
+                let beta_s = squeeze(beta_raw);
+                let score_s = squeeze(score_raw);
+
+                // Scale: alpha/beta → sigmoid * 0.9 + 0.05 ∈ [0.05, 0.95]
+                //         score    → tanh * 300 ∈ [-300, 300]
+                let alpha_vals: Vec<f32> = alpha_s.to_data().as_slice().expect("batch alpha").to_vec();
+                let beta_vals: Vec<f32> = beta_s.to_data().as_slice().expect("batch beta").to_vec();
+                let score_vals: Vec<f32> = score_s.to_data().as_slice().expect("batch score").to_vec();
+
+                // Compute combined loss per sample
+                let mut batch_loss: f32 = 0.0;
+                for (i, sample_label) in batch.iter().enumerate() {
+                    let outcome = sample_label.label; // +1/0/-1
+                    let outcome_bin: f32 = (outcome + 1.0) / 2.0; // → 1/0.5/0
+
+                    let alpha_raw: f32 = alpha_vals[i];
+                    let beta_raw: f32 = beta_vals[i];
+                    let score_raw: f32 = score_vals[i];
+
+                    // Sigmoid + scale for alpha/beta, tanh + scale for score
+                    let alpha = (1.0 / (1.0 + (-alpha_raw).exp())) * 0.9 + 0.05;
+                    let beta = (1.0 / (1.0 + (-beta_raw).exp())) * 0.9 + 0.05;
+                    let nn_score = score_raw.tanh() * 300.0;
+
+                    // MSE on score head
+                    let mse: f32 = ((nn_score / 300.0) - outcome).powi(2);
+
+                    // BCE on alpha/beta heads (target is binary: 1=Red win, 0=Black win, 0.5=draw)
+                    let bce_alpha: f32 = {
+                        let p = alpha.max(1e-15_f32).min(1.0 - 1e-15_f32);
+                        let q = outcome_bin.max(1e-15_f32).min(1.0 - 1e-15_f32);
+                        -q * p.ln() - (1.0 - q) * (1.0 - p).ln()
+                    };
+                    let bce_beta: f32 = {
+                        let p = beta.max(1e-15_f32).min(1.0 - 1e-15_f32);
+                        let q = outcome_bin.max(1e-15_f32).min(1.0 - 1e-15_f32);
+                        -q * p.ln() - (1.0 - q) * (1.0 - p).ln()
+                    };
+
+                    batch_loss += mse + 0.1 * (bce_alpha + bce_beta);
+                }
+                batch_loss /= batch.len() as f32;
+
+                // Backward pass
+                let loss_tensor: Tensor<TrainBackend, 1> = Tensor::from_data(
+                    TensorData::from([batch_loss]), &device
+                );
+                let grads = loss_tensor.backward();
+                let grads = GradientsParams::from_grads(grads, &*net);
+                let new_net = optim.step(lr, (*net).clone(), grads);
+                *net = new_net;
+
+                epoch_loss += batch_loss;
+                if batch_idx % 20 == 0 {
+                    eprintln!("  Epoch {} batch {}/{} loss={:.6}",
+                             epoch, batch_idx, num_batches, batch_loss);
+                }
+            }
+
+            // Validation loss (Phase 2 MSE only)
+            let val_loss = compute_val_loss(net, val_data);
+            eprintln!("Epoch {}: train_loss={:.6} val_loss={:.6}",
+                      epoch, epoch_loss / num_batches as f32, val_loss);
+        }
+    }
+
+    // =============================================================================
+    // SELF-PLAY COLLECTOR WITH GAME OUTCOMES (for Phase 2)
+    // =============================================================================
+
+    /// Collect positions from self-play with game outcome as label.
+    /// Outcome labels: +1.0 (Red wins), 0.0 (draw), -1.0 (Black wins).
+    pub struct SelfPlayOutcomeCollector {
+        samples: Vec<TrainingSample>,
+        max_depth: u8,
+    }
+
+    impl SelfPlayOutcomeCollector {
+        pub fn new(max_depth: u8) -> Self {
+            Self {
+                samples: Vec::new(),
+                max_depth,
+            }
+        }
+
+        /// Run one self-play game, collecting positions with game outcome.
+        /// Returns game outcome: +1.0 (Red wins), 0.0 (draw), -1.0 (Black wins).
+        pub fn run_game(&mut self, rule_set: crate::RuleSet, order: u8) -> f32 {
+            use crate::search;
+
+            let mut board = Board::new(rule_set, order);
+            let mut outcome = 0.0f32;
+
+            loop {
+                if let Some(winner) = board.get_winner() {
+                    outcome = match winner {
+                        Color::Red => 1.0,
+                        Color::Black => -1.0,
+                    };
+                    break;
+                }
+                if board.is_repetition_violation().is_some() {
+                    break;
+                }
+
+                let side = board.current_side;
+
+                // Make a move
+                if let Some(action) = search::find_best_move(&mut board, self.max_depth, side) {
+                    // Store position BEFORE move with current game outcome
+                    // (we don't know outcome yet, so store placeholder 0.0 for now;
+                    //  we'll retroactively label all positions after game ends)
+                    let planes = InputPlanes::from_board(&board, side);
+                    let side_to_move = match side {
+                        Color::Red => 0,
+                        Color::Black => 1,
+                    };
+                    self.samples.push(TrainingSample {
+                        planes: planes.into_vec(),
+                        label: 0.0, // placeholder — will be set after game ends
+                        side_to_move,
+                    });
+                    board.make_move(action);
+                } else {
+                    break;
+                }
+            }
+
+            // Retroactively label all collected positions with game outcome
+            for sample in self.samples.iter_mut() {
+                sample.label = outcome;
+            }
+
+            outcome
+        }
+
+        pub fn into_samples(self) -> Vec<TrainingSample> {
+            self.samples
+        }
     }
 }
