@@ -483,15 +483,13 @@ impl<B: Backend> ResBlock<B> {
     pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
         // ResNet v2: bn → relu → conv for each conv layer.
         // Main path: bn1 → relu → conv1 → bn2 → relu → conv2
-        // Skip path: bn1 → relu → conv_skip (when channels change)
+        // Skip path: 1x1 conv on raw x (when channels differ), or identity
         // Final: add + relu
-        let skip_h = if let Some(ref skip_conv) = self.skip_conv {
-            // bn1 → relu applied to original x for skip normalization
-            let sx = self.bn1.forward(x.clone());
-            let sx = self.relu.forward(sx);
-            skip_conv.forward(sx)
+
+        // Compute skip from raw x — no bn on skip path in ResNet v2
+        let skip_h = if let Some(ref sc) = self.skip_conv {
+            sc.forward(x.clone())
         } else {
-            // Identity skip: x as-is (main path applies bn1 at its start)
             x.clone()
         };
 
@@ -505,8 +503,8 @@ impl<B: Backend> ResBlock<B> {
         h = self.relu.forward(h);
         h = self.conv2.forward(h);
 
-        // Add skip + final relu
-        let h = h + skip_h;
+        // Final add + relu
+        let mut h = h + skip_h;
         self.relu.forward(h)
     }
 }

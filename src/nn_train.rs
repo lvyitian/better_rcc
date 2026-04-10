@@ -164,7 +164,9 @@ pub mod nn_train {
     /// Phase 1: Supervised pretraining — MSE on score head only.
     ///
     /// Uses burn autodiff backend for gradient computation.
-    /// The alpha/beta heads are frozen (no gradient) during this phase.
+    /// Only the score_head is used in the forward pass (alpha/beta heads
+    /// are never called), so they receive zero gradient. The shared
+    /// convolutional backbone and dense layer accumulate gradients.
     pub fn train_supervised(
         net: &mut CompactResNetBurn<TrainBackend>,
         train_data: &[TrainingSample],

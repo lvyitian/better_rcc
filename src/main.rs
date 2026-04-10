@@ -3403,9 +3403,24 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
 
         match choice {
             1 => {
-                let num_games: usize = 1;
-                let max_depth: u8 = 4;
-                let epochs: usize = 15;
+                print!("游戏数量（默认10）：");
+                io::stdout().flush()?;
+                input.clear();
+                stdin.read_line(input)?;
+                let num_games: usize = input.trim().parse().unwrap_or(10);
+
+                print!("搜索深度（默认4）：");
+                io::stdout().flush()?;
+                input.clear();
+                stdin.read_line(input)?;
+                let max_depth: u8 = input.trim().parse().unwrap_or(4);
+
+                print!("训练轮次（默认15）：");
+                io::stdout().flush()?;
+                input.clear();
+                stdin.read_line(input)?;
+                let epochs: usize = input.trim().parse().unwrap_or(15);
+
                 let batch_size: usize = 256;
                 let lr: f64 = 1e-3;
 
@@ -3498,9 +3513,24 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
                     }
                 };
 
-                let num_games: usize = 1;
-                let max_depth: u8 = 4;
-                let epochs: usize = 5;
+                print!("游戏数量（默认10）：");
+                io::stdout().flush()?;
+                input.clear();
+                stdin.read_line(input)?;
+                let num_games: usize = input.trim().parse().unwrap_or(10);
+
+                print!("搜索深度（默认4）：");
+                io::stdout().flush()?;
+                input.clear();
+                stdin.read_line(input)?;
+                let max_depth: u8 = input.trim().parse().unwrap_or(4);
+
+                print!("训练轮次（默认5）：");
+                io::stdout().flush()?;
+                input.clear();
+                stdin.read_line(input)?;
+                let epochs: usize = input.trim().parse().unwrap_or(5);
+
                 let batch_size: usize = 256;
                 let lr: f64 = 5e-4;
 
@@ -3539,6 +3569,18 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
                 }
             }
             4 => {
+                print!("游戏数量（默认10）：");
+                io::stdout().flush()?;
+                input.clear();
+                stdin.read_line(input)?;
+                let num_games: usize = input.trim().parse().unwrap_or(10);
+
+                print!("搜索深度（默认4）：");
+                io::stdout().flush()?;
+                input.clear();
+                stdin.read_line(input)?;
+                let max_depth: u8 = input.trim().parse().unwrap_or(4);
+
                 println!("\n请输入导出文件路径：");
                 input.clear();
                 stdin.read_line(input)?;
@@ -3547,9 +3589,6 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
                     println!("无效路径！");
                     continue;
                 }
-
-                let num_games: usize = 1;
-                let max_depth: u8 = 4;
                 let rule_set = RuleSet::Official;
                 let order: u8 = 1;
 
