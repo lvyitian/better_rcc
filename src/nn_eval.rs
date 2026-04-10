@@ -461,7 +461,9 @@ impl<B: Backend> ResBlock<B> {
             .with_momentum(0.1)
             .with_epsilon(1e-5)
             .init(&device);
-        let conv1 = burn::nn::conv::Conv2dConfig::new([in_ch, out_ch], [3, 3])
+        // conv1: must accept out_ch channels from bn1 (after expand_conv when in_ch != out_ch).
+        // Weight shape [out_ch, out_ch, 3, 3] — takes out_ch input, produces out_ch output.
+        let conv1 = burn::nn::conv::Conv2dConfig::new([out_ch, out_ch], [3, 3])
             .with_padding(PaddingConfig2d::Same)
             .with_bias(true)
             .init(&device);
