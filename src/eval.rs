@@ -1,5 +1,5 @@
 // Public items re-exported from eval submodule for use by other modules
-pub use eval::handcrafted_evaluate;
+// Note: handcrafted_evaluate is imported directly by nn_eval via crate::eval::eval::handcrafted_evaluate
 
 // Re-export types needed by nn_eval (these are pub in main.rs)
 pub use crate::{
