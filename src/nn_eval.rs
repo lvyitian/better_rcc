@@ -236,7 +236,7 @@ impl NNUEFeedForward {
             new_val
         }
         fn rand_i16() -> i16 {
-            (next_u64() % (QA as u64 * 2) as u64) as i16 - QA as i16
+            (next_u64() % (QA as u64 * 2)) as i16 - QA as i16
         }
 
         let mut ft_weights = Vec::with_capacity(INPUT_DIM);
@@ -307,7 +307,8 @@ impl NNUEFeedForward {
         // out_weights are QB quantized, combined is i32 (SCReLU result)
         // combined[i] = screlu(acc[i]) where screlu returns [0, 65025] as i32
         let mut raw = 0i64;
-        for i in 0..(FT_DIM * 2) {
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..FT_DIM * 2 {
             raw += i64::from(self.out_weights[bucket_idx][i]) * i64::from(combined[i]);
         }
 
@@ -320,10 +321,9 @@ impl NNUEFeedForward {
         let scale_f = SCALE as f32;
 
         // Divide by QA first (reduces QA²·QB → QA·QB), then add bias (QA*QB units)
-        let output = ((raw_f / qa_f) + f32::from(self.out_bias[bucket_idx])) * scale_f / (qa_f * qb_f);
-        let output = output.tanh() * scale_f;
-
-        output
+        // Then apply tanh * SCALE to get final output in [-400, 400]
+        let raw_result = ((raw_f / qa_f) + f32::from(self.out_bias[bucket_idx])) * scale_f / (qa_f * qb_f);
+        raw_result.tanh() * scale_f
     }
 
     /// Forward pass returning NNOutput.
@@ -383,6 +383,7 @@ impl<B: Backend> NNUEFeedForwardBurn<B> {
 
     /// Forward returning full [8] bucket outputs for a single sample.
     /// [1, 1260] → [8] (all bucket values before tanh).
+    #[allow(dead_code)]
     pub fn forward_all_buckets(&self, stm: &Tensor<B, 1>, ntm: &Tensor<B, 1>) -> Tensor<B, 1> {
         let stm_2d = stm.clone().reshape([1, INPUT_DIM]);
         let ntm_2d = ntm.clone().reshape([1, INPUT_DIM]);
@@ -500,8 +501,8 @@ pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) 
     let handcrafted = handcrafted_evaluate(board, side, initiative);
 
     // Encode board into NNUE dual-perspective input planes
-    let (stm, ntm) = NNInputPlanes::from_board(board);
-    let non_king_count = crate::nnue_input::count_non_king_pieces(board);
+    let (_stm, _ntm) = NNInputPlanes::from_board(board);
+    let _non_king_count = crate::nnue_input::count_non_king_pieces(board);
 
     #[cfg(feature = "train")]
     let output = {
@@ -516,7 +517,7 @@ pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) 
     };
 
     #[cfg(not(feature = "train"))]
-    let output = NN_NET.forward_output(&stm.data, &ntm.data, non_king_count);
+    let output = NN_NET.forward_output(&_stm.data, &_ntm.data, _non_king_count);
 
     // Normalize alpha + beta to sum to 1 (with minimum floor of 0.05)
     let alpha = output.alpha.max(0.05);

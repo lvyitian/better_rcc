@@ -79,7 +79,15 @@
       "Bash(ls -lh samples.bin*)",
       "Bash(ls -lh *.bin*)",
       "Bash(git rm:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "mcp__plugin_nimble_nimble-mcp-server__nimble_search",
+      "WebFetch(domain:www.chessprogramming.org)",
+      "WebFetch(domain:hxim.github.io)",
+      "WebFetch(domain:www.stockfishchess.org)",
+      "WebFetch(domain:en.wikipedia.org)",
+      "mcp__plugin_microsoft-docs_microsoft-learn__microsoft_docs_search",
+      "mcp__plugin_nimble_nimble-mcp-server__nimble_extract",
+      "Bash(git status:*)"
     ]
   }
 }

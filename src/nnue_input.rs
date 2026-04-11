@@ -7,7 +7,7 @@
 //!
 //! Each 630-feature block is organized as 7 piece types × 90 squares.
 
-use crate::{Board, Color, Piece, PieceType};
+use crate::{Board, PieceType};
 
 /// Input dimension: 1260 = 2 × 630 = 2 × (7 × 90)
 pub const INPUT_DIM: usize = 1260;
@@ -77,11 +77,10 @@ impl NNInputPlanes {
                 if let Some(piece) = cell {
                     // For ntm, their pieces are at base 0, our pieces at base 630
                     // But the board is vertically flipped (y → 9 - y)
-                    let flipped_y = 9 - y;
                     let base = if piece.color == their_color { 0 } else { 630 };
                     let piece_idx = piece.piece_type as usize;
-                    let square_idx = flipped_y as usize * 9 + x;
-                    let feature_idx = base + piece_idx * 90 + square_idx;
+                    let ntm_sq = (9 - y) * 9 + x;
+                    let feature_idx = base + piece_idx * 90 + ntm_sq;
                     ntm.data[feature_idx] = 1.0;
                 }
             }
@@ -103,10 +102,10 @@ pub fn count_non_king_pieces(board: &Board) -> u8 {
     let mut count = 0u8;
     for y in 0..10 {
         for x in 0..9 {
-            if let Some(ref piece) = board.cells[y][x] {
-                if piece.piece_type != PieceType::King {
-                    count += 1;
-                }
+            if let Some(ref piece) = board.cells[y][x]
+               && piece.piece_type != PieceType::King
+            {
+                count += 1;
             }
         }
     }
@@ -116,7 +115,7 @@ pub fn count_non_king_pieces(board: &Board) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Board, RuleSet};
+    use crate::{Board, Color, Piece, PieceType, RuleSet};
 
     #[test]
     fn test_bucket_index() {
@@ -187,14 +186,14 @@ mod tests {
         // Red pieces are at base 0
         let red_chariot_base = 0;
         let red_chariot_pt = PieceType::Chariot as usize;
-        let red_chariot_sq = 9 * 9 + 0; // y=9, x=0
+        let red_chariot_sq = 9 * 9; // y=9, x=0
         let red_chariot_idx = red_chariot_base + red_chariot_pt * 90 + red_chariot_sq;
         assert_eq!(stm.data[red_chariot_idx], 1.0, "Red Chariot at (0,9) should be 1.0 in stm");
 
         // Black pieces should be at base 630
         let black_chariot_base = 630;
         let black_chariot_pt = PieceType::Chariot as usize;
-        let black_chariot_sq = 0 * 9 + 0; // y=0, x=0 (Black's back rank)
+        let black_chariot_sq = 0; // y=0, x=0 (Black's back rank)
         let black_chariot_idx = black_chariot_base + black_chariot_pt * 90 + black_chariot_sq;
         assert_eq!(stm.data[black_chariot_idx], 1.0, "Black Chariot at (0,0) should be 1.0 in stm");
 
@@ -203,13 +202,13 @@ mod tests {
         // So Black Chariot at (0,0) in ntm (vertically flipped position)
         // After flip: y=0 → y=9
         let ntm_black_chariot_base = 0;
-        let ntm_black_chariot_sq = 9 * 9 + 0; // y=9, x=0 after flip
+        let ntm_black_chariot_sq = 9 * 9; // y=9, x=0 after flip
         let ntm_black_chariot_idx = ntm_black_chariot_base + black_chariot_pt * 90 + ntm_black_chariot_sq;
         assert_eq!(ntm.data[ntm_black_chariot_idx], 1.0, "Black Chariot flipped to (0,9) should be 1.0 in ntm");
 
         // For ntm, Red's pieces are at base 630
         let ntm_red_chariot_base = 630;
-        let ntm_red_chariot_sq = 0 * 9 + 0; // y=0, x=0 after flip (Red was at y=9)
+        let ntm_red_chariot_sq = 0; // y=0, x=0 after flip (Red was at y=9)
         let ntm_red_chariot_idx = ntm_red_chariot_base + red_chariot_pt * 90 + ntm_red_chariot_sq;
         assert_eq!(ntm.data[ntm_red_chariot_idx], 1.0, "Red Chariot flipped to (0,0) should be 1.0 in ntm");
 
@@ -254,7 +253,7 @@ mod tests {
         let pawn_pt = PieceType::Pawn as usize;
 
         // stm: Red Pawn at base 0, y=6, x=4 → idx = 0 + 3*90 + 6*9+4 = 270 + 58 = 328
-        let stm_pawn_idx = 0 + pawn_pt * 90 + 6 * 9 + 4;
+        let stm_pawn_idx = pawn_pt * 90 + 6 * 9 + 4;
         assert_eq!(stm.data[stm_pawn_idx], 1.0, "Red Pawn at (4,6) in stm");
 
         // ntm: Red Pawn is "their" piece, at base 630, vertically flipped
@@ -272,7 +271,7 @@ mod tests {
         // ntm: Black Horse is "their" piece (their_color=Black), so at base 0 in ntm
         // Flipped y=3 → y=6, x=1
         // idx = 0 + 4*90 + 6*9+1 = 0 + 360 + 55 = 415
-        let ntm_horse_idx = 0 + horse_pt * 90 + 6 * 9 + 1;
+        let ntm_horse_idx = horse_pt * 90 + 6 * 9 + 1;
         assert_eq!(ntm.data[ntm_horse_idx], 1.0, "Black Horse at (1,3) flipped to (1,6) in ntm at base 0");
     }
 }
