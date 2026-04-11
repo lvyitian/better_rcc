@@ -10,7 +10,6 @@ use std::path::Path;
 use crate::eval::{Board, Color, PieceType};
 use crate::movegen::generate_legal_moves;
 use crate::nn_train::nn_train_impl::{save_training_data, TrainingSample};
-use crate::nn_eval::InputPlanes;
 
 // =============================================================================
 // BIG5 ENCODING HELPERS
@@ -307,13 +306,16 @@ pub fn pgn_to_samples(game: &PgnGame) -> Vec<TrainingSample> {
 
     for (side, move_notation) in &moves {
         // Collect planes BEFORE the move (position to evaluate)
-        let planes = InputPlanes::from_board(&board, *side);
+        use crate::nnue_input::{NNInputPlanes, count_non_king_pieces};
+        let (stm, ntm) = NNInputPlanes::from_board(&board);
         let side_to_move = match side {
             Color::Red => 0u8,
             Color::Black => 1u8,
         };
         samples.push(TrainingSample {
-            planes: planes.into_vec(),
+            stm_planes: stm.data.to_vec(),
+            ntm_planes: ntm.data.to_vec(),
+            non_king_count: count_non_king_pieces(&board),
             label: outcome,
             side_to_move,
         });
@@ -686,7 +688,7 @@ mod tests {
 
         // At least the opening cannon and horse moves should replay
         assert!(!samples.is_empty(), "Should collect at least some samples from opening");
-        assert_eq!(samples[0].planes.len(), 3420, "planes should be 3420 features");
+        assert_eq!(samples[0].stm_planes.len(), 1260, "stm_planes should be 1260 features");
         assert_eq!(samples[0].label, 1.0, "Red won, all positions label 1.0");
     }
 

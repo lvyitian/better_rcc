@@ -3516,7 +3516,7 @@ fn run_one_game(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dyn std
 #[cfg(feature = "train")]
 fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dyn std::error::Error>> {
     use nn_train::nn_train_impl::*;
-    use crate::nn_eval::CompactResNetBurn;
+    use crate::nn_eval::NNUEFeedForwardBurn;
 
     loop {
         println!("\n【训练模式】");
@@ -3584,7 +3584,7 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
                 let val_samples = &all_samples[split..];
                 eprintln!("训练集: {}, 验证集: {}", train_samples.len(), val_samples.len());
 
-                let mut net = CompactResNetBurn::<TrainBackend>::new();
+                let mut net = NNUEFeedForwardBurn::<TrainBackend>::new();
                 train_supervised(&mut net, train_samples, val_samples, epochs, batch_size, lr);
 
                 let path = "nn_weights.bin";
@@ -3622,7 +3622,7 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
                 let val_samples = &samples[split..];
                 eprintln!("训练集: {}, 验证集: {}", train_samples.len(), val_samples.len());
 
-                let mut net = CompactResNetBurn::<TrainBackend>::new();
+                let mut net = NNUEFeedForwardBurn::<TrainBackend>::new();
                 train_supervised(&mut net, train_samples, val_samples, epochs, batch_size, lr);
 
                 let save_path = "nn_weights.bin";
@@ -3641,7 +3641,7 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
                     }
                     Err(e) => {
                         eprintln!("加载权重失败：{}，将重新开始训练", e);
-                        CompactResNetBurn::<TrainBackend>::new()
+                        NNUEFeedForwardBurn::<TrainBackend>::new()
                     }
                 };
 

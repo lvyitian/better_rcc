@@ -5,14 +5,10 @@ use crate::{Board, Color, PieceType};
 #[allow(unused_imports)]
 use crate::RuleSet;
 use crate::eval::eval_impl::{handcrafted_evaluate, game_phase};
-use ndarray::{Array4, Array3, Array2, Array1};
-
 #[cfg(feature = "train")]
 use burn::prelude::*;
 #[cfg(feature = "train")]
 use burn::module::Module;
-#[cfg(feature = "train")]
-use burn::nn::{PaddingConfig2d, Relu, BatchNorm, BatchNormConfig};
 
 /// Input planes for neural network evaluation.
 /// 38 planes of 9x10 = 3420 total values.
@@ -175,470 +171,299 @@ impl InputPlanes {
 }
 
 // =============================================================================
-// Compact ResNet for Neural Network Evaluation
+// NNUE (Efficiently Updatable Neural Networks) Evaluation
+// Bullet-compliant (1260→512)×2→8 architecture
 // =============================================================================
 
-/// He initialization for weights
-#[allow(dead_code)]
-fn he_init(_out_ch: usize, in_ch: usize, k: usize) -> f32 {
-    let std = (2.0 / (in_ch as f32 * k as f32 * k as f32)).sqrt();
-    (fast_rand() - 0.5) * 2.0 * std
-}
+use crate::nnue_input::{INPUT_DIM, FT_DIM, NUM_BUCKETS, QA, QB, SCALE, bucket_index, NNInputPlanes};
 
-/// Fast random number generator (Xorshift64)
-#[allow(dead_code)]
-fn fast_rand() -> f32 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static STATE: AtomicU64 = AtomicU64::new(0x123456789ABCDEF0);
-    fn next() -> u64 {
-        let current = STATE.load(Ordering::Relaxed);
-        let new_val = current.wrapping_mul(6364136223846793005).wrapping_add(1);
-        STATE.store(new_val, Ordering::Relaxed);
-        new_val
-    }
-    next() as f32 / u64::MAX as f32
-}
-
-/// Sigmoid with output range [min_val, max_val]
-#[allow(dead_code)]
-fn sigmoid_range(x: f32, min_val: f32, max_val: f32) -> f32 {
-    let s = 1.0 / (1.0 + (-x).exp());
-    min_val + (max_val - min_val) * s
-}
-
-/// Naive 2D convolution: input [B, IC, H, W], weight [OC, IC, 3, 3], bias [OC, H, W]
-#[allow(dead_code)]
-fn conv2d(input: &Array4<f32>, weight: &Array4<f32>, bias: &Array3<f32>) -> Array4<f32> {
-    let (batch, in_ch, h, w) = (input.shape()[0], input.shape()[1], input.shape()[2], input.shape()[3]);
-    let (out_ch, _, k, _) = (weight.shape()[0], weight.shape()[1], weight.shape()[2], weight.shape()[3]);
-    let pad = k / 2;
-    let mut output = Array4::<f32>::zeros((batch, out_ch, h, w));
-
-    for b in 0..batch {
-        for oc in 0..out_ch {
-            for y in 0..h {
-                for x in 0..w {
-                    let mut sum = bias[[oc, y, x]];
-                    for ic in 0..in_ch {
-                        for ky in 0..k {
-                            for kx in 0..k {
-                                let in_y = y as i32 + ky as i32 - pad as i32;
-                                let in_x = x as i32 + kx as i32 - pad as i32;
-                                if in_y >= 0 && in_y < h as i32 && in_x >= 0 && in_x < w as i32 {
-                                    sum += input[[b, ic, in_y as usize, in_x as usize]]
-                                        * weight[[oc, ic, ky, kx]];
-                                }
-                            }
-                        }
-                    }
-                    output[[b, oc, y, x]] = sum;
-                }
-            }
-        }
-    }
-    output
-}
-
-/// ReLU activation
-#[allow(dead_code)]
-fn relu(x: &Array4<f32>) -> Array4<f32> {
-    x.mapv(|v| v.max(0.0))
-}
-
-/// Add two arrays of same shape (in-place via flat iteration)
-#[allow(dead_code)]
-fn add_arrays(a: &Array4<f32>, b: &Array4<f32>) -> Array4<f32> {
-    let mut out = a.clone();
-    let a_slice = out.as_slice_mut().unwrap();
-    let b_slice = b.as_slice().unwrap();
-    for i in 0..a_slice.len() {
-        a_slice[i] += b_slice[i];
-    }
-    out
-}
-
-/// Global average pooling: [B, C, H, W] -> [B, C]
-#[allow(dead_code)]
-fn global_avg_pool(x: &Array4<f32>) -> Array2<f32> {
-    let h = x.shape()[2] as f32;
-    let w = x.shape()[3] as f32;
-    let mut out = Array2::<f32>::zeros((x.shape()[0], x.shape()[1]));
-    for b in 0..x.shape()[0] {
-        for c in 0..x.shape()[1] {
-            let mut sum = 0.0f32;
-            for y in 0..x.shape()[2] {
-                for x_idx in 0..x.shape()[3] {
-                    sum += x[[b, c, y, x_idx]];
-                }
-            }
-            out[[b, c]] = sum / (h * w);
-        }
-    }
-    out
-}
-
-/// Compact ResNet for Chinese Chess evaluation.
-/// ~180K parameters, optimized for CPU inference.
+/// Feature transform output: 512 i16 values, cache-line aligned for SIMD.
+#[repr(C, align(64))]
 #[derive(Clone)]
+struct Accumulator {
+    vals: [i16; FT_DIM],
+}
+
+impl Accumulator {
+    fn zero() -> Self {
+        Self { vals: [0i16; FT_DIM] }
+    }
+}
+
+/// SCReLU activation: clamp(x, 0, 255)² returning i32.
+#[inline]
+fn screlu(x: i16) -> i32 {
+    let y = i32::from(x).clamp(0, 255);
+    y * y
+}
+
+/// NNUE feed-forward network using plain ndarray (inference only).
 #[allow(dead_code)]
-pub struct CompactResNet {
-    // Initial conv: 38 -> 32 channels
-    init_w: Array4<f32>,
-    init_b: Array3<f32>,
-
-    // Block 1: 32 -> 32 (identity skip)
-    b1_w1: Array4<f32>, b1_b1: Array3<f32>,
-    b1_w2: Array4<f32>, b1_b2: Array3<f32>,
-
-    // Block 2: 32 -> 32 (identity skip)
-    b2_w1: Array4<f32>, b2_b1: Array3<f32>,
-    b2_w2: Array4<f32>, b2_b2: Array3<f32>,
-
-    // Block 3: 32 -> 64 (1x1 conv skip)
-    b3_w1: Array4<f32>, b3_b1: Array3<f32>,
-    b3_w2: Array4<f32>, b3_b2: Array3<f32>,
-    b3_skip_w: Array4<f32>, b3_skip_b: Array3<f32>,
-
-    // Block 4: 64 -> 64 (identity skip)
-    b4_w1: Array4<f32>, b4_b1: Array3<f32>,
-    b4_w2: Array4<f32>, b4_b2: Array3<f32>,
-
-    // Block 5: 64 -> 64 (identity skip)
-    b5_w1: Array4<f32>, b5_b1: Array3<f32>,
-    b5_w2: Array4<f32>, b5_b2: Array3<f32>,
-
-    // Block 6: 64 -> 64 (identity skip)
-    b6_w1: Array4<f32>, b6_b1: Array3<f32>,
-    b6_w2: Array4<f32>, b6_b2: Array3<f32>,
-
-    // Dense: 64 -> 64
-    dense_w: Array2<f32>, dense_b: Array1<f32>,
-
-    // Output heads: 64 -> 1 each
-    alpha_w: Array2<f32>, alpha_b: Array1<f32>,
-    beta_w: Array2<f32>, beta_b: Array1<f32>,
-    score_w: Array2<f32>, score_b: Array1<f32>,
-    correction_w: Array2<f32>, correction_b: Array1<f32>,
+pub struct NNUEFeedForward {
+    /// Feature transform weights: [INPUT_DIM][FT_DIM] stored as 1260 Accumulators (column-major).
+    /// Each column f has weights for feature f across all 512 hidden units.
+    ft_weights: Vec<Accumulator>,
+    /// Feature transform bias: [FT_DIM], QA quantized.
+    ft_bias: [i16; FT_DIM],
+    /// Output layer weights: [NUM_BUCKETS][FT_DIM * 2] for bucketized output.
+    /// Each bucket has 1024 = 512 (stm) + 512 (ntm) inputs.
+    out_weights: [[i16; FT_DIM * 2]; NUM_BUCKETS],
+    /// Output layer bias: [NUM_BUCKETS], QA * QB quantized.
+    out_bias: [i16; NUM_BUCKETS],
 }
 
 #[allow(dead_code)]
-impl CompactResNet {
+impl NNUEFeedForward {
+    /// Create with zero-initialized weights (for loading from checkpoint).
     pub fn new() -> Self {
-        let make4 = |oc, ic, k: usize| -> Array4<f32> {
-            let mut a = Array4::<f32>::zeros((oc, ic, k, k));
-            for i in 0..oc {
-                for j in 0..ic {
-                    for ki in 0..k {
-                        for kj in 0..k {
-                            a[[i, j, ki, kj]] = he_init(oc, ic, k);
-                        }
-                    }
+        Self {
+            ft_weights: vec![Accumulator::zero(); INPUT_DIM],
+            ft_bias: [0i16; FT_DIM],
+            out_weights: [[0i16; FT_DIM * 2]; NUM_BUCKETS],
+            out_bias: [0i16; NUM_BUCKETS],
+        }
+    }
+
+    /// Initialize with random weights for testing.
+    #[allow(dead_code)]
+    pub fn random() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static STATE: AtomicU64 = AtomicU64::new(0x123456789ABCDEF0);
+        fn next_u64() -> u64 {
+            let current = STATE.load(Ordering::Relaxed);
+            let new_val = current.wrapping_mul(6364136223846793005).wrapping_add(1);
+            STATE.store(new_val, Ordering::Relaxed);
+            new_val
+        }
+        fn rand_i16() -> i16 {
+            (next_u64() % (QA as u64 * 2) as u64) as i16 - QA as i16
+        }
+
+        let mut ft_weights = Vec::with_capacity(INPUT_DIM);
+        for _ in 0..INPUT_DIM {
+            ft_weights.push(Accumulator { vals: [rand_i16(); FT_DIM] });
+        }
+        let ft_bias = [rand_i16(); FT_DIM];
+        let out_weights = [[rand_i16(); FT_DIM * 2]; NUM_BUCKETS];
+        let out_bias = [rand_i16(); NUM_BUCKETS];
+
+        Self { ft_weights, ft_bias, out_weights, out_bias }
+    }
+
+    /// Compute accumulators for stm and ntm inputs.
+    /// Each accumulator = ft_bias + sum over active features of ft_weights[feature].
+    /// Result clamped to [0, QA] and stored as i16.
+    fn compute_accumulators(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM]) -> (Accumulator, Accumulator) {
+        let mut stm_acc = Accumulator::zero();
+        let mut ntm_acc = Accumulator::zero();
+
+        // Add ft_bias to accumulators
+        for i in 0..FT_DIM {
+            stm_acc.vals[i] = self.ft_bias[i];
+            ntm_acc.vals[i] = self.ft_bias[i];
+        }
+
+        // Add weights for active features
+        for f in 0..INPUT_DIM {
+            if stm[f] != 0.0 {
+                for i in 0..FT_DIM {
+                    stm_acc.vals[i] = stm_acc.vals[i].saturating_add(self.ft_weights[f].vals[i]);
                 }
             }
-            a
-        };
-        let make3 = |c, h, w| Array3::<f32>::zeros((c, h, w));
-        let make2 = |r, c| Array2::<f32>::zeros((r, c));
-        let make1 = |n| Array1::<f32>::zeros(n);
-
-        Self {
-            init_w: make4(32, 38, 3), init_b: make3(32, 9, 10),
-            b1_w1: make4(32, 32, 3), b1_b1: make3(32, 9, 10),
-            b1_w2: make4(32, 32, 3), b1_b2: make3(32, 9, 10),
-            b2_w1: make4(32, 32, 3), b2_b1: make3(32, 9, 10),
-            b2_w2: make4(32, 32, 3), b2_b2: make3(32, 9, 10),
-            b3_w1: make4(64, 32, 3), b3_b1: make3(64, 9, 10),
-            b3_w2: make4(64, 64, 3), b3_b2: make3(64, 9, 10),
-            b3_skip_w: make4(64, 32, 1), b3_skip_b: make3(64, 9, 10),
-            b4_w1: make4(64, 64, 3), b4_b1: make3(64, 9, 10),
-            b4_w2: make4(64, 64, 3), b4_b2: make3(64, 9, 10),
-            b5_w1: make4(64, 64, 3), b5_b1: make3(64, 9, 10),
-            b5_w2: make4(64, 64, 3), b5_b2: make3(64, 9, 10),
-            b6_w1: make4(64, 64, 3), b6_b1: make3(64, 9, 10),
-            b6_w2: make4(64, 64, 3), b6_b2: make3(64, 9, 10),
-            dense_w: make2(64, 64), dense_b: make1(64),
-            alpha_w: make2(1, 64), alpha_b: make1(1),
-            beta_w: make2(1, 64), beta_b: make1(1),
-            score_w: make2(1, 64), score_b: make1(1),
-            correction_w: make2(1, 64), correction_b: make1(1),
-        }
-    }
-
-    /// Residual block forward
-    fn res_block(&self, x: &Array4<f32>,
-                 w1: &Array4<f32>, b1: &Array3<f32>,
-                 w2: &Array4<f32>, b2: &Array3<f32>,
-                 skip: Option<(&Array4<f32>, &Array3<f32>)>) -> Array4<f32> {
-        let h = relu(&conv2d(x, w1, b1));
-        let h = conv2d(&h, w2, b2);
-        let skip_val = match skip {
-            Some((sw, sb)) => conv2d(x, sw, sb),
-            None => x.clone(),
-        };
-        add_arrays(&h, &skip_val)
-    }
-
-    pub fn forward(&self, input: &InputPlanes) -> NNOutput {
-        // Initial conv: 38 -> 32, ReLU
-        let x = relu(&conv2d(&input.to_array4(), &self.init_w, &self.init_b));
-
-        // Block 1: 32 -> 32
-        let x = self.res_block(&x, &self.b1_w1, &self.b1_b1, &self.b1_w2, &self.b1_b2, None);
-
-        // Block 2: 32 -> 32
-        let x = self.res_block(&x, &self.b2_w1, &self.b2_b1, &self.b2_w2, &self.b2_b2, None);
-
-        // Block 3: 32 -> 64 (downsample)
-        let x = self.res_block(&x, &self.b3_w1, &self.b3_b1, &self.b3_w2, &self.b3_b2,
-                               Some((&self.b3_skip_w, &self.b3_skip_b)));
-
-        // Block 4: 64 -> 64
-        let x = self.res_block(&x, &self.b4_w1, &self.b4_b1, &self.b4_w2, &self.b4_b2, None);
-
-        // Block 5: 64 -> 64
-        let x = self.res_block(&x, &self.b5_w1, &self.b5_b1, &self.b5_w2, &self.b5_b2, None);
-
-        // Block 6: 64 -> 64
-        let x = self.res_block(&x, &self.b6_w1, &self.b6_b1, &self.b6_w2, &self.b6_b2, None);
-
-        // Global average pooling: [1, 64, 9, 10] -> [1, 64]
-        let pooled = global_avg_pool(&x);
-
-        // Dense: 64 -> 64, ReLU
-        let mut dense = pooled.dot(&self.dense_w.t());
-        {
-            let slice = dense.as_slice_mut().unwrap();
-            for v in slice.iter_mut() { *v = v.max(0.0); }
+            if ntm[f] != 0.0 {
+                for i in 0..FT_DIM {
+                    ntm_acc.vals[i] = ntm_acc.vals[i].saturating_add(self.ft_weights[f].vals[i]);
+                }
+            }
         }
 
-        // Heads
-        let alpha_raw = dense[[0, 0]] * self.alpha_w[[0, 0]] + self.alpha_b[[0]];
-        let beta_raw = dense[[0, 0]] * self.beta_w[[0, 0]] + self.beta_b[[0]];
-        let score_raw = dense[[0, 0]] * self.score_w[[0, 0]] + self.score_b[[0]];
-        let correction_raw = dense[[0, 0]] * self.correction_w[[0, 0]] + self.correction_b[[0]];
+        // Clamp to [0, QA] and convert to i16
+        for i in 0..FT_DIM {
+            stm_acc.vals[i] = stm_acc.vals[i].clamp(0, QA as i16);
+            ntm_acc.vals[i] = ntm_acc.vals[i].clamp(0, QA as i16);
+        }
 
-        let alpha = sigmoid_range(alpha_raw, 0.05, 0.95);
-        let beta = sigmoid_range(beta_raw, 0.05, 0.95);
-        let nn_score = score_raw.tanh() * 400.0;
-        let correction = correction_raw.tanh() * 400.0;
+        (stm_acc, ntm_acc)
+    }
 
-        NNOutput { alpha, beta, nn_score, correction }
+    /// Forward pass returning raw f32 score.
+    /// `non_king_count` determines which bucket to use.
+    #[allow(dead_code)]
+    pub fn forward(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM], non_king_count: u8) -> f32 {
+        let (stm_acc, ntm_acc) = self.compute_accumulators(stm, ntm);
+
+        // Apply SCReLU: clamp(0, QA)² → i32
+        // Then split and concatenate: [stm_acc(512), ntm_acc(512)] = 1024
+        let mut combined = [0i32; FT_DIM * 2];
+        for i in 0..FT_DIM {
+            combined[i] = screlu(stm_acc.vals[i]);
+            combined[FT_DIM + i] = screlu(ntm_acc.vals[i]);
+        }
+
+        // Select bucket
+        let bucket_idx = bucket_index(non_king_count);
+
+        // Compute dot product: out_weights[bucket] · combined
+        // out_weights are QB quantized, combined is i32 (SCReLU result)
+        // combined[i] = screlu(acc[i]) where screlu returns [0, 65025] as i32
+        let mut raw = 0i64;
+        for i in 0..(FT_DIM * 2) {
+            raw += i64::from(self.out_weights[bucket_idx][i]) * i64::from(combined[i]);
+        }
+
+        // Spec formula: output = ((Σ/QA) + bias) * SCALE / (QA*QB) then tanh * SCALE
+        // Σ/QA reduces quantization from QA²·QB → QA·QB
+        // Bias is stored in QA*QB units, so no conversion needed when adding
+        let raw_f = raw as f32;
+        let qb_f = QB as f32;
+        let qa_f = QA as f32;
+        let scale_f = SCALE as f32;
+
+        // Divide by QA first (reduces QA²·QB → QA·QB), then add bias (QA*QB units)
+        let output = ((raw_f / qa_f) + f32::from(self.out_bias[bucket_idx])) * scale_f / (qa_f * qb_f);
+        let output = output.tanh() * scale_f;
+
+        output
+    }
+
+    /// Forward pass returning NNOutput.
+    #[allow(dead_code)]
+    pub fn forward_output(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM], non_king_count: u8) -> NNOutput {
+        let score = self.forward(stm, ntm, non_king_count);
+        // For NNUE, alpha=1.0, beta=0.0 (pure NN evaluation)
+        NNOutput {
+            alpha: 1.0,
+            beta: 0.0,
+            nn_score: score,
+            correction: 0.0,
+        }
     }
 }
 
-impl Default for CompactResNet {
+impl Default for NNUEFeedForward {
     fn default() -> Self { Self::new() }
 }
 
 // =============================================================================
-// Compact ResNet for Neural Network Evaluation (burn)
+// NNUE Feed-Forward with Burn (training)
 // =============================================================================
 
-/// Residual block for burn: two 3×3 convs with optional 1×1 skip for channel changes.
-/// Per ResNet v2: bn → relu → conv for each conv layer; skip added before final relu.
 #[cfg(feature = "train")]
+#[allow(dead_code)]
 #[derive(Module, Debug)]
-pub struct ResBlock<B: Backend> {
-    pub conv1: burn::nn::conv::Conv2d<B>,
-    pub bn1: BatchNorm<B>,
-    pub conv2: burn::nn::conv::Conv2d<B>,
-    pub bn2: BatchNorm<B>,
-    /// Optional 1×1 conv for channel change in skip connection.
-    pub skip_conv: Option<burn::nn::conv::Conv2d<B>>,
-    /// Optional 1×1 conv to expand channels before bn1 when in_ch != out_ch.
-    pub expand_conv: Option<burn::nn::conv::Conv2d<B>>,
-    pub relu: Relu,
+pub struct NNUEFeedForwardBurn<B: Backend = burn_ndarray::NdArray<f32>> {
+    ft: burn::nn::Linear<B>,
+    out: burn::nn::Linear<B>,
 }
 
 #[cfg(feature = "train")]
-impl<B: Backend> ResBlock<B> {
-    /// channels: [in, out]. If in != out, creates a 1×1 conv skip.
-    fn new(channels: [usize; 2]) -> Self {
-        let device = <B as Backend>::Device::default();
-        let (in_ch, out_ch) = (channels[0], channels[1]);
-
-        let bn1 = BatchNormConfig::new(out_ch)
-            .with_momentum(0.1)
-            .with_epsilon(1e-5)
-            .init(&device);
-        // conv1: must accept out_ch channels from bn1 (after expand_conv when in_ch != out_ch).
-        // Weight shape [out_ch, out_ch, 3, 3] — takes out_ch input, produces out_ch output.
-        let conv1 = burn::nn::conv::Conv2dConfig::new([out_ch, out_ch], [3, 3])
-            .with_padding(PaddingConfig2d::Same)
-            .with_bias(true)
-            .init(&device);
-
-        let bn2 = BatchNormConfig::new(out_ch)
-            .with_momentum(0.1)
-            .with_epsilon(1e-5)
-            .init(&device);
-        let conv2 = burn::nn::conv::Conv2dConfig::new([out_ch, out_ch], [3, 3])
-            .with_padding(PaddingConfig2d::Same)
-            .with_bias(true)
-            .init(&device);
-
-        let skip_conv = if in_ch != out_ch {
-            Some(burn::nn::conv::Conv2dConfig::new([in_ch, out_ch], [1, 1])
-                .with_padding(PaddingConfig2d::Valid)
-                .with_bias(true)
-                .init(&device))
-        } else {
-            None
-        };
-
-        // Expand conv: 1x1 conv to expand channels before bn1 when in_ch != out_ch.
-        // This ensures bn1 (configured with out_ch) receives a tensor with out_ch channels.
-        let expand_conv = if in_ch != out_ch {
-            Some(burn::nn::conv::Conv2dConfig::new([in_ch, out_ch], [1, 1])
-                .with_padding(PaddingConfig2d::Valid)
-                .with_bias(true)
-                .init(&device))
-        } else {
-            None
-        };
-
-        Self { conv1, bn1, conv2, bn2, skip_conv, expand_conv, relu: Relu::new() }
-    }
-
-    pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
-        // ResNet v2: bn → relu → conv for each conv layer.
-        // Main path: bn1 → relu → conv1 → bn2 → relu → conv2
-        // Skip path: 1x1 conv on raw x (when channels differ), or identity
-        // Final: add + relu
-
-        // Compute skip from raw x — no bn on skip path in ResNet v2
-        let skip_h = if let Some(ref sc) = self.skip_conv {
-            sc.forward(x.clone())
-        } else {
-            x.clone()
-        };
-
-        // Main path: expand channels (if needed) → bn1 → relu → conv1
-        // When in_ch != out_ch, expand_conv expands x to out_ch channels BEFORE bn1,
-        // ensuring bn1 (configured with out_ch) receives a tensor with matching channels.
-        let h = if let Some(ref ec) = self.expand_conv {
-            ec.forward(x)
-        } else {
-            x
-        };
-        let mut h = self.bn1.forward(h);
-        h = self.relu.forward(h);
-        h = self.conv1.forward(h);
-
-        // Main path: bn2 → relu → conv2
-        h = self.bn2.forward(h);
-        h = self.relu.forward(h);
-        h = self.conv2.forward(h);
-
-        // Final add + relu
-        let h = h + skip_h;
-        self.relu.forward(h)
-    }
-}
-
-/// Compact ResNet using burn Module derive.
-#[cfg(feature = "train")]
-#[derive(Module, Debug)]
-pub struct CompactResNetBurn<B: Backend = burn_ndarray::NdArray<f32>> {
-    pub init_conv: burn::nn::conv::Conv2d<B>,
-    pub b1: ResBlock<B>,
-    pub b2: ResBlock<B>,
-    pub b3: ResBlock<B>,
-    pub b4: ResBlock<B>,
-    pub b5: ResBlock<B>,
-    pub b6: ResBlock<B>,
-    pub dense: burn::nn::Linear<B>,
-    pub alpha_head: burn::nn::Linear<B>,
-    pub beta_head: burn::nn::Linear<B>,
-    pub score_head: burn::nn::Linear<B>,
-    pub correction_head: burn::nn::Linear<B>,
-    pub relu: Relu,
-}
-
-#[cfg(feature = "train")]
-impl<B: Backend> CompactResNetBurn<B> {
+impl<B: Backend> NNUEFeedForwardBurn<B> {
     pub fn new() -> Self {
         let device = <B as Backend>::Device::default();
-        let init_conv = burn::nn::conv::Conv2dConfig::new([38, 32], [3, 3])
-            .with_padding(PaddingConfig2d::Same)
+        // Feature transform: 1260 → 512
+        let ft = burn::nn::LinearConfig::new(INPUT_DIM, FT_DIM)
             .with_bias(true)
             .init(&device);
-        let b1 = ResBlock::new([32, 32]);
-        let b2 = ResBlock::new([32, 32]);
-        let b3 = ResBlock::new([32, 64]); // downsample: 32→64
-        let b4 = ResBlock::new([64, 64]);
-        let b5 = ResBlock::new([64, 64]);
-        let b6 = ResBlock::new([64, 64]);
-        let dense = burn::nn::LinearConfig::new(64, 64)
+        // Output: 1024 → 8 buckets
+        let out = burn::nn::LinearConfig::new(FT_DIM * 2, NUM_BUCKETS)
             .with_bias(true)
             .init(&device);
-        let alpha_head = burn::nn::LinearConfig::new(64, 1)
-            .with_bias(true)
-            .init(&device);
-        let beta_head = burn::nn::LinearConfig::new(64, 1)
-            .with_bias(true)
-            .init(&device);
-        let score_head = burn::nn::LinearConfig::new(64, 1)
-            .with_bias(true)
-            .init(&device);
-        let correction_head = burn::nn::LinearConfig::new(64, 1)
-            .with_bias(true)
-            .init(&device);
-        Self {
-            init_conv, b1, b2, b3, b4, b5, b6,
-            dense, alpha_head, beta_head, score_head, correction_head,
-            relu: Relu::new(),
-        }
+        Self { ft, out }
     }
 
-    /// Forward pass producing NNOutput.
-    pub fn forward_for_inference(&self, planes: &InputPlanes) -> NNOutput
-    {
-        use burn::tensor::TensorData;
-        let device = <B as Backend>::Device::default();
-        // Convert flat [f32; 3420] → Tensor<B, 4> shape [1, 38, 9, 10]
-        let flat_arr: [f32; 3420] = planes.data;
-        let data = TensorData::from(flat_arr);
-        let flat: Tensor<B, 1> = Tensor::from_data(data, &device);
-        let x: Tensor<B, 4> = flat.reshape([1, 38, 9, 10]);
+    /// Forward with explicit bucket index (for single sample).
+    /// Accepts 1D tensors [1260] for single-sample evaluation.
+    pub fn forward_with_bucket(&self, stm: &Tensor<B, 1>, ntm: &Tensor<B, 1>, bucket_idx: usize) -> Tensor<B, 1> {
+        // Reshape to [1, 1260], forward batch, squeeze back to scalar
+        let stm_2d = stm.clone().reshape([1, INPUT_DIM]);
+        let ntm_2d = ntm.clone().reshape([1, INPUT_DIM]);
+        let result = self.forward_batched_impl(&stm_2d, &ntm_2d, bucket_idx);
+        result.reshape([1])
+    }
 
-        // Initial conv: 38 → 32
-        let x = self.relu.forward(self.init_conv.forward(x));
+    /// Forward returning full [8] bucket outputs for a single sample.
+    /// [1, 1260] → [8] (all bucket values before tanh).
+    pub fn forward_all_buckets(&self, stm: &Tensor<B, 1>, ntm: &Tensor<B, 1>) -> Tensor<B, 1> {
+        let stm_2d = stm.clone().reshape([1, INPUT_DIM]);
+        let ntm_2d = ntm.clone().reshape([1, INPUT_DIM]);
 
-        // Residual blocks
-        let x = self.b1.forward(x);
-        let x = self.b2.forward(x);
-        let x = self.b3.forward(x);
-        let x = self.b4.forward(x);
-        let x = self.b5.forward(x);
-        let x = self.b6.forward(x);
+        // FT: [1, 1260] → [1, 512]
+        let ft_stm = self.ft.forward(stm_2d);
+        let ft_ntm = self.ft.forward(ntm_2d);
 
-        // Global average pool: [1, 64, 9, 10] → [1, 64]
-        let pooled = x.mean_dim(3).mean_dim(2).reshape([1, 64]); // [1, 64]
+        // SCReLU: clamp(0, 255)²
+        let clamped_stm = ft_stm.clamp(0.0, 255.0);
+        let clamped_ntm = ft_ntm.clamp(0.0, 255.0);
+        let stm_act = clamped_stm.clone() * clamped_stm;
+        let ntm_act = clamped_ntm.clone() * clamped_ntm;
 
-        // Dense + ReLU
-        let dense_out = self.relu.forward(self.dense.forward(pooled));
+        // Concatenate: [1, 1024]
+        let combined = Tensor::cat(vec![stm_act, ntm_act], 1);
 
-        // Heads
-        let to_f32 = |t: Tensor<B, 2>| -> f32 {
-            t.to_data().as_slice().expect("expected 1x1 tensor")[0]
-        };
-        let alpha_raw = to_f32(self.alpha_head.forward(dense_out.clone()));
-        let beta_raw = to_f32(self.beta_head.forward(dense_out.clone()));
-        let score_raw = to_f32(self.score_head.forward(dense_out.clone()));
-        let correction_raw = to_f32(self.correction_head.forward(dense_out));
+        // Output: [1, 1024] → [1, 8]
+        self.out.forward(combined).reshape([8])
+    }
 
-        let alpha = (1.0f32 / (1.0f32 + (-alpha_raw).exp())) * 0.9 + 0.05;
-        let beta = (1.0f32 / (1.0f32 + (-beta_raw).exp())) * 0.9 + 0.05;
-        let nn_score = score_raw.tanh() * 400.0;
-        let correction = correction_raw.tanh() * 400.0;
+    /// Batched forward pass: [batch, 1260] → [batch] bucket-selected scalar output.
+    /// Applies FT → SCReLU → concat → output projection → gather bucket.
+    fn forward_batched_impl(&self, stm: &Tensor<B, 2>, ntm: &Tensor<B, 2>, bucket_idx: usize) -> Tensor<B, 1> {
+        // FT: [batch, 1260] → [batch, 512]
+        let ft_stm = self.ft.forward(stm.clone());
+        let ft_ntm = self.ft.forward(ntm.clone());
 
-        NNOutput { alpha, beta, nn_score, correction }
+        // SCReLU: clamp(0, 255)² applied element-wise — shape unchanged [batch, 512]
+        let clamped_stm = ft_stm.clamp(0.0, 255.0);
+        let clamped_ntm = ft_ntm.clamp(0.0, 255.0);
+        let stm_act = clamped_stm.clone() * clamped_stm;
+        let ntm_act = clamped_ntm.clone() * clamped_ntm;
+
+        // Concatenate along feature dim: [batch, 1024]
+        let combined = Tensor::cat(vec![stm_act, ntm_act], 1);
+
+        // Output projection: [batch, 1024] → [batch, 8]
+        let out = self.out.forward(combined);
+
+        // Gather bucket column for each sample in batch: [batch]
+        let batch_size = out.shape()[0];
+        let bucket_range = bucket_idx as i64..(bucket_idx + 1) as i64;
+        let bucket_idx_tensor = Tensor::arange(bucket_range, &out.device());
+        out.gather(1, bucket_idx_tensor.reshape([batch_size, 1])).reshape([batch_size])
+    }
+
+    /// Batched forward: compute bucket-selected output for a batch of samples.
+    /// [batch, 1260] × 2 → [batch] raw bucket values (before tanh).
+    pub fn forward_batched_with_bucket(
+        &self,
+        stm: &Tensor<B, 2>,
+        ntm: &Tensor<B, 2>,
+        bucket_idx: usize,
+    ) -> Tensor<B, 1> {
+        self.forward_batched_impl(stm, ntm, bucket_idx)
+    }
+
+    /// Batched forward: return all 8 bucket outputs for each sample in the batch.
+    /// [batch, 1260] × 2 → [batch, 8] raw bucket values (before tanh).
+    pub fn forward_batched_all_buckets(&self, stm: &Tensor<B, 2>, ntm: &Tensor<B, 2>) -> Tensor<B, 2> {
+        // FT: [batch, 1260] → [batch, 512]
+        let ft_stm = self.ft.forward(stm.clone());
+        let ft_ntm = self.ft.forward(ntm.clone());
+
+        // SCReLU: clamp(0, 255)² applied element-wise — shape unchanged [batch, 512]
+        let clamped_stm = ft_stm.clamp(0.0, 255.0);
+        let clamped_ntm = ft_ntm.clamp(0.0, 255.0);
+        let stm_act = clamped_stm.clone() * clamped_stm;
+        let ntm_act = clamped_ntm.clone() * clamped_ntm;
+
+        // Concatenate along feature dim: [batch, 1024]
+        let combined = Tensor::cat(vec![stm_act, ntm_act], 1);
+
+        // Output projection: [batch, 1024] → [batch, 8]
+        self.out.forward(combined)
     }
 }
 
 #[cfg(feature = "train")]
-impl<B: Backend> Default for CompactResNetBurn<B> {
+impl<B: Backend> Default for NNUEFeedForwardBurn<B> {
     fn default() -> Self { Self::new() }
 }
 
@@ -658,8 +483,8 @@ pub struct NNOutput {
 
 /// Global NN instance (ndarray version), lazily initialized.
 #[cfg(not(feature = "train"))]
-static NN_NET: std::sync::LazyLock<CompactResNet> =
-    std::sync::LazyLock::new(CompactResNet::new);
+static NN_NET: std::sync::LazyLock<NNUEFeedForward> =
+    std::sync::LazyLock::new(NNUEFeedForward::random);
 
 /// Hybrid NN + handcrafted evaluation.
 ///
@@ -674,18 +499,24 @@ static NN_NET: std::sync::LazyLock<CompactResNet> =
 pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) -> i32 {
     let handcrafted = handcrafted_evaluate(board, side, initiative);
 
-    let input = InputPlanes::from_board(board, side);
+    // Encode board into NNUE dual-perspective input planes
+    let (stm, ntm) = NNInputPlanes::from_board(board);
+    let non_king_count = crate::nnue_input::count_non_king_pieces(board);
 
     #[cfg(feature = "train")]
     let output = {
-        type InferenceBackend = burn_ndarray::NdArray<f32>;
-        static NET: std::sync::LazyLock<CompactResNetBurn<InferenceBackend>> =
-            std::sync::LazyLock::new(CompactResNetBurn::new);
-        NET.forward_for_inference(&input)
+        // For training, we would use NNUEFeedForwardBurn
+        // For now, fall back to handcrafted only in train mode before Task 4
+        NNOutput {
+            alpha: 1.0,
+            beta: 0.0,
+            nn_score: 0.0,
+            correction: 0.0,
+        }
     };
 
     #[cfg(not(feature = "train"))]
-    let output = NN_NET.forward(&input);
+    let output = NN_NET.forward_output(&stm.data, &ntm.data, non_king_count);
 
     // Normalize alpha + beta to sum to 1 (with minimum floor of 0.05)
     let alpha = output.alpha.max(0.05);
@@ -746,19 +577,21 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_resnet_forward_output_ranges() {
-        let net = CompactResNet::new();
+    fn test_nnue_forward_output_ranges() {
+        let net = NNUEFeedForward::random();
         let board = Board::new(RuleSet::Official, 1);
-        let planes = InputPlanes::from_board(&board, Color::Red);
-        let output = net.forward(&planes);
+        let (stm, ntm) = NNInputPlanes::from_board(&board);
+        let non_king_count = crate::nnue_input::count_non_king_pieces(&board);
+        let output = net.forward_output(&stm.data, &ntm.data, non_king_count);
 
-        // Alpha and beta should be in [0.05, 0.95]
-        assert!(output.alpha >= 0.05 && output.alpha <= 0.95,
-            "alpha {} out of range [0.05, 0.95]", output.alpha);
-        assert!(output.beta >= 0.05 && output.beta <= 0.95,
-            "beta {} out of range [0.05, 0.95]", output.beta);
+        // Alpha and beta should be in [0.05, 0.95] for hybrid eval
+        // But NNUE returns alpha=1.0, beta=0.0 (pure NN)
+        assert!(output.alpha >= 0.0 && output.alpha <= 1.0,
+            "alpha {} out of range [0, 1]", output.alpha);
+        assert!(output.beta >= 0.0 && output.beta <= 1.0,
+            "beta {} out of range [0, 1]", output.beta);
 
-        // NN score and correction should be in roughly [-400, 400]
+        // NN score should be in roughly [-400, 400]
         assert!(output.nn_score >= -400.0 && output.nn_score <= 400.0,
             "nn_score {} out of range [-400, 400]", output.nn_score);
         assert!(output.correction >= -400.0 && output.correction <= 400.0,
