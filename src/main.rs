@@ -3061,6 +3061,14 @@ pub mod search {
     }
 
     pub fn find_best_move(board: &mut Board, max_depth: u8, side: Color) -> Option<Action> {
+        // If current side has no king, game is already over — no moves to search
+        let (red_king, black_king) = board.find_kings();
+        let has_lost = (side == Color::Red && red_king.is_none())
+                    || (side == Color::Black && black_king.is_none());
+        if has_lost {
+            return None;
+        }
+
         if board.move_history.len() < 15 {
             static BOOK: OnceLock<OpeningBook> = OnceLock::new();
             let book = BOOK.get_or_init(OpeningBook::new);

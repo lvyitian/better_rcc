@@ -112,10 +112,10 @@ pub mod nn_train_impl {
             use crate::eval::eval_impl::handcrafted_evaluate;
 
             let mut board = Board::new(rule_set, order);
-            let mut outcome = 0.0f32; // draw default
+            let outcome: f32;
 
             loop {
-                // Check game over
+                // Check game over (king captured or repetition)
                 if let Some(winner) = board.get_winner() {
                     outcome = match winner {
                         Color::Red => 1.0,
@@ -131,23 +131,48 @@ pub mod nn_train_impl {
                     break;
                 }
 
-                // Collect position before move
                 let side = board.current_side;
-                let score = search::find_best_move(&mut board, self.max_depth, side)
-                    .map(|_| {
-                        // Use handcrafted eval as proxy score for supervised training
-                        handcrafted_evaluate(&board, side, false) as f32
-                    })
-                    .unwrap_or(0.0);
 
-                // Store sample with position before the move
+                // Search once: returns None if kingless or no legal moves
+                let action = match search::find_best_move(&mut board, self.max_depth, side) {
+                    Some(a) => a,
+                    None => {
+                        // No legal moves: could be kingless (loss) or stalemate (draw)
+                        // Check winner first to distinguish: king gone → loss, else stalemate
+                        if let Some(winner) = board.get_winner() {
+                            outcome = match winner {
+                                Color::Red => 1.0,
+                                Color::Black => -1.0,
+                            };
+                        } else {
+                            // No king was captured — must be stalemate
+                            outcome = if board.is_check(side) {
+                                // In check → checkmate → opponent wins
+                                match side.opponent() {
+                                    Color::Red => 1.0,
+                                    Color::Black => -1.0,
+                                }
+                            } else {
+                                0.0 // stalemate → draw
+                            };
+                        }
+                        break;
+                    }
+                };
+
+                // Score the position before the move
+                let score = handcrafted_evaluate(&board, side, false) as f32;
                 let sample = TrainingSample::from_board(&board, side, score as i32);
                 self.samples.push(sample);
 
-                // Make a move
-                if let Some(action) = search::find_best_move(&mut board, self.max_depth, side) {
-                    board.make_move(action);
-                } else {
+                board.make_move(action);
+
+                // Re-check in case a king was captured during this move
+                if let Some(winner) = board.get_winner() {
+                    outcome = match winner {
+                        Color::Red => 1.0,
+                        Color::Black => -1.0,
+                    };
                     break;
                 }
             }
