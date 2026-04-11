@@ -34,7 +34,7 @@ final_score = (alpha / (alpha + beta)) * nn_score
 
 Where:
 - `alpha`, `beta` ∈ [0, 1] — learned sigmoid weights (never completely zero)
-- `correction` ∈ [-1, 1] — additive centipawn offset, scaled by 300 cp
+- `correction` ∈ [-1, 1] — additive centipawn offset, scaled by 400 cp
 - `nn_score` = network's raw prediction scaled to centipawns
 
 ---
@@ -165,7 +165,7 @@ impl Forward for ResidualBlock {
 ### 3.3 Output Scaling
 
 - **Alpha/Beta:** `sigmoid(output) * 0.9 + 0.05` → range [0.05, 0.95]
-- **Score:** `tanh(output) * 300.0` → range [-300, +300] centipawns
+- **Score:** `tanh(output) * 400.0` → range [-400, +400] centipawns
 
 ### 3.4 Parameter Count
 
@@ -291,7 +291,7 @@ pub fn evaluate(board: &Board, side: Color, initiative: bool) -> i32 {
     
     // NN outputs score in centipawns already scaled
     let nn_score = output.score;
-    let correction = output.correction * 300.0;  // Scale correction
+    let correction = output.correction * 400.0;  // Scale correction
     
     let blended = alpha_norm * nn_score + beta_norm * handcrafted as f32 + correction;
     blended as i32

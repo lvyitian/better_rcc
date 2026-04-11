@@ -206,8 +206,8 @@ impl<B: burn::backend::Backend> CompactResNet<B> {
         let correction_raw = self.correction_head.forward(&dense_out).to_data().value[0];
         let alpha = (1.0 / (1.0 + (-alpha_raw).exp())) * 0.9 + 0.05;
         let beta = (1.0 / (1.0 + (-beta_raw).exp())) * 0.9 + 0.05;
-        let nn_score = score_raw.tanh() * 300.0;
-        let correction = correction_raw.tanh() * 300.0;
+        let nn_score = score_raw.tanh() * 400.0;
+        let correction = correction_raw.tanh() * 400.0;
         NNOutput { alpha, beta, nn_score, correction }
     }
 }
@@ -536,7 +536,7 @@ pub fn train_supervised(
                 let input = sample.to_input_planes().to_burn_tensor::<TrainBackend>();
                 let out = net.forward(input);
                 let target = sample.label;
-                let loss = (out.nn_score as f64 / 300.0 - target as f64).powi(2);
+                let loss = (out.nn_score as f64 / 400.0 - target as f64).powi(2);
                 total_loss += loss;
             }
             let avg_loss = total_loss / batch.len() as f64;
@@ -554,7 +554,7 @@ pub fn train_supervised(
         for sample in val_data {
             let input = sample.to_input_planes().to_burn_tensor::<TrainBackend>();
             let out = net.forward(input);
-            let loss = (out.nn_score as f64 / 300.0 - sample.label as f64).powi(2);
+            let loss = (out.nn_score as f64 / 400.0 - sample.label as f64).powi(2);
             val_loss += loss;
         }
         val_loss /= val_data.len() as f64;
@@ -811,8 +811,8 @@ fn test_burn_compact_resnet_output_ranges() {
     let output = net.forward_for_inference(&planes);
     assert!(output.alpha >= 0.05 && output.alpha <= 0.95);
     assert!(output.beta >= 0.05 && output.beta <= 0.95);
-    assert!(output.nn_score >= -300.0 && output.nn_score <= 300.0);
-    assert!(output.correction >= -300.0 && output.correction <= 300.0);
+    assert!(output.nn_score >= -400.0 && output.nn_score <= 400.0);
+    assert!(output.correction >= -400.0 && output.correction <= 400.0);
 }
 ```
 
@@ -866,7 +866,7 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 - [x] Plane layout (0-33 as implemented, not spec's 0-37) — documented in spec
 - [x] 4 output heads with correct scaling — Task 2
 - [x] Alpha/beta sigmoid range [0.05, 0.95] with minimum floor — Task 7
-- [x] Correction tanh * 300 — Task 2
+- [x] Correction tanh * 400 — Task 2
 - [x] Phase 1 supervised training loop — Task 5
 - [x] Phase 2 self-play fine-tuning stub — Task 4 + 6 (Phase 2 marked TODO)
 - [x] Binary training data format with bincode — Task 3

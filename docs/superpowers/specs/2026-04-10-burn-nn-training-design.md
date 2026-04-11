@@ -70,8 +70,8 @@ Dense: 64→64, ReLU
 4 output heads (Linear 64→1):
   alpha:     sigmoid → ×0.9 + 0.05 → [0.05, 0.95]
   beta:      sigmoid → ×0.9 + 0.05 → [0.05, 0.95]
-  nn_score:  tanh → ×300 → [-300, 300] centipawns
-  correction: tanh → ×300 → [-300, 300] centipawns
+  nn_score:  tanh → ×400 → [-400, 400] centipawns
+  correction: tanh → ×400 → [-400, 400] centipawns
 ```
 
 ### 3.2 Residual Block
@@ -92,8 +92,8 @@ Forward: `h = relu(conv1(x)); h = conv2(h); h += skip(x); relu(h)`
 
 Each head is a separate `nn::Linear<B>` with 1 output. Output scaling applied after the raw linear pass:
 - **Alpha/Beta:** `sigmoid(linear_out) * 0.9 + 0.05` → range [0.05, 0.95]
-- **NN score:** `tanh(linear_out) * 300.0` → range [-300, 300]
-- **Correction:** `tanh(linear_out) * 300.0` → range [-300, 300]
+- **NN score:** `tanh(linear_out) * 400.0` → range [-400, 400]
+- **Correction:** `tanh(linear_out) * 400.0` → range [-400, 400]
 
 ---
 
@@ -166,7 +166,7 @@ final_score = (alpha / (alpha + beta)) * nn_score
 ```
 
 - alpha, beta ∈ [0.05, 0.95] — sigmoid-clamped, minimum 0.05 floor
-- nn_score, correction ∈ [-300, 300] centipawns
+- nn_score, correction ∈ [-400, 400] centipawns
 - handcrafted_score cast to f32
 
 ---
@@ -258,7 +258,7 @@ Minimum clamp at 0.05 ensures neither component is ever completely ignored.
 ## 10. Testing
 
 1. **Inference sanity:** `CompactResNet::forward()` at starting position produces near-zero score
-2. **Output range:** alpha, beta ∈ [0.05, 0.95]; nn_score, correction ∈ [-300, 300]
+2. **Output range:** alpha, beta ∈ [0.05, 0.95]; nn_score, correction ∈ [-400, 400]
 3. **Forward/backward:** training loop completes one epoch without NaN
 4. **Weight save/load:** saved weights produce identical inference output
 5. **Self-play collection:** collector produces legal moves and valid game outcomes

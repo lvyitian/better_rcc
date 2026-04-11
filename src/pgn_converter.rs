@@ -51,7 +51,7 @@ fn is_direction_char(ch: char) -> bool {
 fn parse_file_from_char(ch: char) -> Option<u8> {
     let c = ch as u32;
     // Fullwidth digits: U+FF11 to U+FF19 → 1-9
-    if c >= 0xFF11 && c <= 0xFF19 {
+    if (0xFF11..=0xFF19).contains(&c) {
         return Some((c - 0xFF10) as u8);
     }
     // Chinese numerals: 一U+4E00, 二U+4E8C, 三U+4E09, 四U+56DB,
@@ -137,7 +137,7 @@ pub fn parse_chinese_move(move_str: &str, board: &Board, side: Color) -> Option<
     let mut all_moves = generate_legal_moves(&mut b, side);
     all_moves.retain(|a| {
         board.get(a.src)
-            .map_or(false, |p| p.piece_type == piece && p.color == side)
+            .is_some_and(|p| p.piece_type == piece && p.color == side)
     });
 
     for action in all_moves {
@@ -159,17 +159,17 @@ pub fn parse_chinese_move(move_str: &str, board: &Board, side: Color) -> Option<
             '進' => {
                 if piece == PieceType::Horse {
                     // Horse 進: sf is source file. Disambiguate among horses.
-                    src_file.map_or(true, |sf| action.src.x == to_x(sf))
+                    src_file.is_none() || src_file.is_some_and(|sf| action.src.x == to_x(sf))
                 } else if piece == PieceType::Pawn || piece == PieceType::Advisor || piece == PieceType::King {
                     // Single-step: dy must be forward_dir AND src file must match
                     if dy != forward_dir { false }
                     else {
-                        src_file.map_or(dx == 0, |sf| action.src.x == to_x(sf))
+                        src_file.is_some_and(|sf| action.src.x == to_x(sf)) || src_file.is_none() && dx == 0
                     }
                 } else {
                     // Sliding pieces: dy must be forward_dir
                     if dy != forward_dir { false }
-                    else { src_file.map_or(true, |sf| action.src.x == to_x(sf)) }
+                    else { src_file.is_some_and(|sf| action.src.x == to_x(sf)) || src_file.is_none() }
                 }
             }
             '退' => {
@@ -178,7 +178,7 @@ pub fn parse_chinese_move(move_str: &str, board: &Board, side: Color) -> Option<
                 else if piece == PieceType::Pawn || piece == PieceType::Advisor || piece == PieceType::King {
                     dx == 0
                 }
-                else { src_file.map_or(true, |sf| action.src.x == to_x(sf)) }
+                else { src_file.is_some_and(|sf| action.src.x == to_x(sf)) || src_file.is_none() }
             }
             _ => false,
         };
@@ -240,26 +240,19 @@ impl PgnGame {
                 if let Some(fen_end) = rest.find("\"") {
                     fen = rest[..fen_end].to_string();
                 }
-            } else if let Some(rest) = line.strip_prefix("[Result \"") {
-                if let Some(res_end) = rest.find("\"") {
-                    result = rest[..res_end].to_string();
-                }
-            }
-
-            // Check if this is a move line (starts with "1." "2." etc.)
-            if let Some(num_part) = line.strip_prefix(|c: char| c.is_ascii_digit()) {
-                if num_part.starts_with('.') || num_part.starts_with(' ') {
-                    in_moves = true;
-                    // This is a move line — collect all tokens
-                    for token in line.split_whitespace() {
-                        // Skip the move number prefix (e.g., "1." or "1..")
-                        let token = token.trim_end_matches('.');
-                        if !token.is_empty() && token != "0-1" && token != "1-0" && token != "1/2-1/2" {
-                            // Check it's actually Chinese notation (contains high bytes)
-                            let token_bytes = token.as_bytes();
-                            if token_bytes.len() >= 2 && (token_bytes[0] & 0x80 != 0 || token_bytes[0] == b'0') {
-                                move_lines.push(token.to_string());
-                            }
+            } else if let Some(rest) = line.strip_prefix("[Result \"") && let Some(res_end) = rest.find('"') {
+                result = rest[..res_end].to_string();
+            } else if let Some(num_part) = line.strip_prefix(|c: char| c.is_ascii_digit()) && (num_part.starts_with('.') || num_part.starts_with(' ')) {
+                in_moves = true;
+                // This is a move line — collect all tokens
+                for token in line.split_whitespace() {
+                    // Skip the move number prefix (e.g., "1." or "1..")
+                    let token = token.trim_end_matches('.');
+                    if !token.is_empty() && token != "0-1" && token != "1-0" && token != "1/2-1/2" {
+                        // Check it's actually Chinese notation (contains high bytes)
+                        let token_bytes = token.as_bytes();
+                        if token_bytes.len() >= 2 && (token_bytes[0] & 0x80 != 0 || token_bytes[0] == b'0') {
+                            move_lines.push(token.to_string());
                         }
                     }
                 }
@@ -303,12 +296,12 @@ pub fn pgn_to_samples(game: &PgnGame) -> Vec<TrainingSample> {
 
     // Collect all move tokens as (side, notation) pairs
     let mut moves: Vec<(Color, String)> = Vec::new();
-    for (_i, token) in game.move_lines.iter().enumerate() {
+    for token in game.move_lines.iter() {
         // Skip result tokens
         if *token == "0-1" || *token == "1-0" || *token == "1/2-1/2" {
             continue;
         }
-        let side = if moves.len() % 2 == 0 { Color::Red } else { Color::Black };
+        let side = if moves.len().is_multiple_of(2) { Color::Red } else { Color::Black };
         moves.push((side, token.clone()));
     }
 
@@ -351,10 +344,8 @@ fn find_pgn_files(dir: &Path) -> Vec<std::path::PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 files.extend(find_pgn_files(&path));
-            } else if let Some(ext) = path.extension() {
-                if ext.eq_ignore_ascii_case("pgn") {
-                    files.push(path);
-                }
+            } else if let Some(ext) = path.extension() && ext.eq_ignore_ascii_case("pgn") {
+                files.push(path);
             }
         }
     }
@@ -537,7 +528,7 @@ mod tests {
         let mut b = board.clone();
         let moves = crate::movegen::generate_legal_moves(&mut b, Color::Red);
         let horse_moves: Vec<_> = moves.iter().filter(|a| {
-            board.get(a.src).map_or(false, |p| p.piece_type == crate::eval::PieceType::Horse && p.color == Color::Red)
+            board.get(a.src).is_some_and(|p| p.piece_type == crate::eval::PieceType::Horse && p.color == Color::Red)
         }).collect();
         eprintln!("DEBUG horse moves:");
         for a in &horse_moves {

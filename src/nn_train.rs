@@ -245,13 +245,13 @@ pub mod nn_train_impl {
                 let dense_out = net.relu.forward(net.dense.forward(pooled));
                 let score_out = net.score_head.forward(dense_out);
 
-                // MSE loss: mean((score_normalized - target)^2) where score_normalized = score/300
+                // MSE loss: mean((score_normalized - target)^2) where score_normalized = score/400
                 // All computation stays in Burn tensors to preserve autodiff graph
                 let targets_tensor: Tensor<TrainBackend, 1> = Tensor::from_data(
                     TensorData::from(targets.as_slice()), &device
                 );
                 let score_squeezed = score_out.reshape([batch.len() as u32]);
-                let normalized = score_squeezed / 300.0;
+                let normalized = score_squeezed / 400.0;
                 let diff = normalized - targets_tensor;
                 let loss_tensor = diff.clone() * diff;
                 let batch_loss: f32 = loss_tensor.clone().mean().to_data().as_slice()
@@ -308,9 +308,9 @@ pub mod nn_train_impl {
 
             // Extract scalar from [1, 1] tensor
             let score_raw: f32 = score_out.to_data().as_slice().expect("expected 1x1")[0];
-            let nn_score = score_raw.tanh() * 300.0;
+            let nn_score = score_raw.tanh() * 400.0;
 
-            let loss = (nn_score / 300.0 - sample.label).powi(2);
+            let loss = (nn_score / 400.0 - sample.label).powi(2);
             total_loss += loss;
         }
         total_loss / val_data.len() as f32
@@ -410,55 +410,49 @@ pub mod nn_train_impl {
                 let beta_s = squeeze(beta_raw);
                 let score_s = squeeze(score_raw);
 
-                // Scale: alpha/beta → sigmoid * 0.9 + 0.05 ∈ [0.05, 0.95]
-                //         score    → tanh * 300 ∈ [-300, 300]
-                let alpha_vals: Vec<f32> = alpha_s.to_data().as_slice().expect("batch alpha").to_vec();
-                let beta_vals: Vec<f32> = beta_s.to_data().as_slice().expect("batch beta").to_vec();
-                let score_vals: Vec<f32> = score_s.to_data().as_slice().expect("batch score").to_vec();
-
-                // Compute combined loss per sample
-                let mut batch_loss: f32 = 0.0;
-                for (i, sample_label) in batch.iter().enumerate() {
-                    let outcome = sample_label.label; // +1/0/-1
-                    let outcome_bin: f32 = (outcome + 1.0) / 2.0; // → 1/0.5/0
-
-                    let alpha_raw: f32 = alpha_vals[i];
-                    let beta_raw: f32 = beta_vals[i];
-                    let score_raw: f32 = score_vals[i];
-
-                    // Sigmoid + scale for alpha/beta, tanh + scale for score
-                    let alpha = (1.0 / (1.0 + (-alpha_raw).exp())) * 0.9 + 0.05;
-                    let beta = (1.0 / (1.0 + (-beta_raw).exp())) * 0.9 + 0.05;
-                    let nn_score = score_raw.tanh() * 300.0;
-
-                    // MSE on score head
-                    let mse: f32 = ((nn_score / 300.0) - outcome).powi(2);
-
-                    // BCE on alpha/beta heads (target is binary: 1=Red win, 0=Black win, 0.5=draw)
-                    let bce_alpha: f32 = {
-                        let p = alpha.clamp(1e-15_f32, 1.0 - 1e-15_f32);
-                        let q = outcome_bin.clamp(1e-15_f32, 1.0 - 1e-15_f32);
-                        -q * p.ln() - (1.0 - q) * (1.0 - p).ln()
-                    };
-                    let bce_beta: f32 = {
-                        let p = beta.clamp(1e-15_f32, 1.0 - 1e-15_f32);
-                        let q = outcome_bin.clamp(1e-15_f32, 1.0 - 1e-15_f32);
-                        -q * p.ln() - (1.0 - q) * (1.0 - p).ln()
-                    };
-
-                    batch_loss += mse + 0.1 * (bce_alpha + bce_beta);
-                }
-                batch_loss /= batch.len() as f32;
-
-                // Backward pass
-                let loss_tensor: Tensor<TrainBackend, 1> = Tensor::from_data(
-                    TensorData::from([batch_loss]), &device
+                // Extract outcome labels into Vec<f32>
+                let outcomes: Vec<f32> = batch.iter().map(|s| s.label).collect();
+                let outcomes_tensor: Tensor<TrainBackend, 1> = Tensor::from_data(
+                    TensorData::from(outcomes.as_slice()), &device
                 );
+
+                // All loss computation stays in Burn tensor ops — preserves autodiff graph.
+                // alpha/beta: raw logits passed to BCE which applies sigmoid internally
+                // score: tanh * 400 ∈ [-400, 400]
+                let nn_score = score_s.clone().tanh() * 400.0;
+
+                // MSE on score head: mean((nn_score/400 - outcome)^2)
+                // nn_score/400 ∈ [-1, 1] matches outcome ∈ [-1, 1]
+                let diff = nn_score / 400.0 - outcomes_tensor.clone();
+                let mse = diff.clone() * diff;
+
+                // BCE on alpha/beta heads using BinaryCrossEntropyLoss with logits=true.
+                // forward() expects targets as Int tensor.
+                // outcomes ∈ {-1, 0, 1} → convert to {0, 0.5, 1} via (x+1)/2, then .int()
+                let outcomes_binary = ((outcomes_tensor.clone() + 1.0) / 2.0).int();
+                let bce_alpha = burn::nn::loss::BinaryCrossEntropyLossConfig::new()
+                    .with_logits(true)
+                    .init(&device)
+                    .forward(alpha_s.clone(), outcomes_binary.clone());
+                let bce_beta = burn::nn::loss::BinaryCrossEntropyLossConfig::new()
+                    .with_logits(true)
+                    .init(&device)
+                    .forward(beta_s.clone(), outcomes_binary);
+
+                let loss_tensor: Tensor<TrainBackend, 1> = mse.mean() + 0.1 * (bce_alpha + bce_beta);
+
+                // Backward pass — gradients flow through full model
                 let grads = loss_tensor.backward();
+
+                // Verify grads are well-formed by constructing GradientsParams.
+                // A graph fracture (e.g., loss computed in Rust scalars) would panic here.
                 let grads = GradientsParams::from_grads(grads, &*net);
                 let new_net = optim.step(lr, (*net).clone(), grads);
                 *net = new_net;
 
+                // Log loss (recompute from tensor for accurate reporting)
+                let batch_loss: f32 = loss_tensor.clone().mean().to_data().as_slice()
+                    .expect("batch loss")[0];
                 epoch_loss += batch_loss;
                 if batch_idx % 20 == 0 {
                     eprintln!("  Epoch {} batch {}/{} loss={:.6}",
@@ -600,7 +594,7 @@ pub mod nn_train_impl {
             let targets_tensor: Tensor<TrainBackend, 1> =
                 Tensor::from_data(TensorData::from(targets.as_slice()), &device);
             let score_squeezed = score_out.reshape([1]);
-            let normalized = score_squeezed / 300.0;
+            let normalized = score_squeezed / 400.0;
             let diff = normalized - targets_tensor;
             let loss_tensor = diff.clone() * diff;
 

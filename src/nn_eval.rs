@@ -419,8 +419,8 @@ impl CompactResNet {
 
         let alpha = sigmoid_range(alpha_raw, 0.05, 0.95);
         let beta = sigmoid_range(beta_raw, 0.05, 0.95);
-        let nn_score = score_raw.tanh() * 300.0;
-        let correction = correction_raw.tanh() * 300.0;
+        let nn_score = score_raw.tanh() * 400.0;
+        let correction = correction_raw.tanh() * 400.0;
 
         NNOutput { alpha, beta, nn_score, correction }
     }
@@ -630,8 +630,8 @@ impl<B: Backend> CompactResNetBurn<B> {
 
         let alpha = (1.0f32 / (1.0f32 + (-alpha_raw).exp())) * 0.9 + 0.05;
         let beta = (1.0f32 / (1.0f32 + (-beta_raw).exp())) * 0.9 + 0.05;
-        let nn_score = score_raw.tanh() * 300.0;
-        let correction = correction_raw.tanh() * 300.0;
+        let nn_score = score_raw.tanh() * 400.0;
+        let correction = correction_raw.tanh() * 400.0;
 
         NNOutput { alpha, beta, nn_score, correction }
     }
@@ -650,9 +650,9 @@ pub struct NNOutput {
     pub alpha: f32,
     /// Beta weight for handcrafted score component. Range [0.05, 0.95].
     pub beta: f32,
-    /// NN raw score in centipawns. Range [-300, 300].
+    /// NN raw score in centipawns. Range [-400, 400].
     pub nn_score: f32,
-    /// Additive correction. Range [-300, 300] centipawns.
+    /// Additive correction. Range [-400, 400] centipawns.
     pub correction: f32,
 }
 
@@ -668,8 +668,8 @@ static NN_NET: std::sync::LazyLock<CompactResNet> =
 ///               + (beta / (alpha + beta)) * handcrafted_score
 ///               + correction
 ///
-/// Where alpha, beta ∈ [0.05, 0.95] (sigmoid-clamped), nn_score ∈ [-300, 300],
-/// correction ∈ [-300, 300], handcrafted_score is in centipawns.
+/// Where alpha, beta ∈ [0.05, 0.95] (sigmoid-clamped), nn_score ∈ [-400, 400],
+/// correction ∈ [-400, 400], handcrafted_score is in centipawns.
 #[allow(dead_code)]
 pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) -> i32 {
     let handcrafted = handcrafted_evaluate(board, side, initiative);
@@ -696,7 +696,7 @@ pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) 
 
     // NN outputs already scaled to centipawns
     let nn_score = output.nn_score;
-    // Correction is in [-300, 300] range, use as additive centipawn offset
+    // Correction is in [-400, 400] range, use as additive centipawn offset
     let correction = output.correction;
 
     let blended = alpha_norm * nn_score + beta_norm * handcrafted as f32 + correction;
@@ -758,11 +758,11 @@ mod tests {
         assert!(output.beta >= 0.05 && output.beta <= 0.95,
             "beta {} out of range [0.05, 0.95]", output.beta);
 
-        // NN score and correction should be in roughly [-300, 300]
-        assert!(output.nn_score >= -300.0 && output.nn_score <= 300.0,
-            "nn_score {} out of range [-300, 300]", output.nn_score);
-        assert!(output.correction >= -300.0 && output.correction <= 300.0,
-            "correction {} out of range [-300, 300]", output.correction);
+        // NN score and correction should be in roughly [-400, 400]
+        assert!(output.nn_score >= -400.0 && output.nn_score <= 400.0,
+            "nn_score {} out of range [-400, 400]", output.nn_score);
+        assert!(output.correction >= -400.0 && output.correction <= 400.0,
+            "correction {} out of range [-400, 400]", output.correction);
     }
 
     #[test]

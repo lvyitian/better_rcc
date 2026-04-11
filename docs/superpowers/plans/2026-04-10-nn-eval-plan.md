@@ -581,9 +581,10 @@ pub struct NNOutput {
     pub alpha: f32,
     /// Beta weight for handcrafted score component. Range [0.05, 0.95].
     pub beta: f32,
-    /// NN raw score in centipawns (pre-scaling). Range [-300, 300].
+    /// NN raw score in centipawns (pre-scaling). Range [-400, 400].
     pub nn_score: f32,
-    /// Additive correction. Range [-300, 300] centipawns.
+    /// Additive correction. Range [-400, 400] centipawns.
+    pub correction: f32,
     pub correction: f32,
 }
 ```
@@ -985,14 +986,14 @@ impl CompactResNet {
         
         let alpha = sigmoid(alpha_raw, 0.05, 0.95);
         let beta = sigmoid(beta_raw, 0.05, 0.95);
-        let nn_score = score_raw.tanh() * 300.0;  // Scale to centipawns
+        let nn_score = score_raw.tanh() * 400.0;  // Scale to centipawns
         
         NNOutput { alpha, beta, nn_score, correction: nn_score }
     }
 }
 ```
 
-Note: `correction` is set equal to `nn_score` initially. The blending formula will use correction separately. Actually per the spec: `correction ∈ [-1, 1]` scaled by 300. So we need a separate correction output. Let me add a dedicated correction head.
+Note: `correction` is set equal to `nn_score` initially. The blending formula will use correction separately. Actually per the spec: `correction ∈ [-1, 1]` scaled by 400. So we need a separate correction output. Let me add a dedicated correction head.
 
 Fix the forward pass: add a third head for correction:
 ```rust
@@ -1002,7 +1003,7 @@ pub score_correction_w: Array2<f32>, pub score_correction_b: Array1<f32>,
 And in forward():
 ```rust
 let correction_raw = dense1.dot(&self.score_correction_w.t())[0] + self.score_correction_b[0];
-let correction = correction_raw.tanh() * 300.0;  // [-300, 300] centipawns
+let correction = correction_raw.tanh() * 400.0;  // [-400, 400] centipawns
 ```
 
 Update all places where CompactResNet is constructed to include the new fields.
@@ -1194,7 +1195,7 @@ pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) 
         let alpha_norm = alpha / total;
         let beta_norm = beta / total;
         
-        // Correction is separate from score — per spec: correction * 300
+        // Correction is separate from score — per spec: correction * 400
         let correction = out.correction;
         let blended = alpha_norm * out.nn_score + beta_norm * handcrafted as f32 + correction;
         blended as i32
@@ -1305,7 +1306,7 @@ pub mod train {
         let mut total_loss = 0.0f32;
         for sample in samples {
             let out = net.forward(&sample.planes);
-            let predicted = out.nn_score / 300.0;  // normalize back to [-1,1]
+            let predicted = out.nn_score / 400.0;  // normalize back to [-1,1]
             let diff = predicted - sample.label;
             total_loss += diff * diff;
         }
