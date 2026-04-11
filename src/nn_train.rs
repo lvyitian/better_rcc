@@ -341,9 +341,10 @@ pub mod nn_train_impl {
             let bucket_idx = crate::nnue_input::bucket_index(sample.non_king_count);
             let bucket_tensor = net.forward_with_bucket(&stm_tensor, &ntm_tensor, bucket_idx);
             let score_raw: f32 = bucket_tensor.to_data().as_slice().expect("expected 1x1")[0];
-            let nn_score = score_raw.tanh() * 400.0;
-
-            let loss = (nn_score - sample.label).powi(2);
+            // Normalize to [-1, 1] to match label units (same as training)
+            let nn_score = score_raw.tanh();
+            let normalized = nn_score - sample.label;
+            let loss = normalized * normalized;
             total_loss += loss;
         }
         total_loss / val_data.len() as f32

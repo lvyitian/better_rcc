@@ -425,10 +425,10 @@ impl<B: Backend> NNUEFeedForwardBurn<B> {
         let out = self.out.forward(combined);
 
         // Gather bucket column for each sample in batch: [batch]
+        // Use Tensor::full to broadcast single bucket_idx to all batch elements
         let batch_size = out.shape()[0];
-        let bucket_range = bucket_idx as i64..(bucket_idx + 1) as i64;
-        let bucket_idx_tensor = Tensor::arange(bucket_range, &out.device());
-        out.gather(1, bucket_idx_tensor.reshape([batch_size, 1])).reshape([batch_size])
+        let bucket_idx_tensor = Tensor::full([batch_size, 1], bucket_idx as i64, &out.device());
+        out.gather(1, bucket_idx_tensor).reshape([batch_size])
     }
 
     /// Batched forward: compute bucket-selected output for a batch of samples.
