@@ -5,10 +5,11 @@ edition = "2024"
 
 [dependencies]
 smallvec = "1"
-ndarray = "0.16"
+ndarray = "0.17"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 encoding_rs = "0.8"
+zstd = "0.13"
 
 [dev-dependencies]
 rand = "0.8"

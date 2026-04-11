@@ -70,7 +70,16 @@
       "Bash(rustc --version)",
       "Bash(cargo --version)",
       "Bash(xxd -l 200 \"F:/ccpd/Dataset/對局/大師對局/以棋手分類/吳貴臨/00000001.pgn\")",
-      "Bash(taskkill //F //IM \"better_rust_chinese_chess-c1aad3513ce7fdd8.exe\")"
+      "Bash(taskkill //F //IM \"better_rust_chinese_chess-c1aad3513ce7fdd8.exe\")",
+      "Bash(git push:*)",
+      "Bash(git remote:*)",
+      "Bash(git lfs:*)",
+      "Bash(git reset:*)",
+      "Bash(git config:*)",
+      "Bash(ls -lh samples.bin*)",
+      "Bash(ls -lh *.bin*)",
+      "Bash(git rm:*)",
+      "Bash(git commit:*)"
     ]
   }
 }

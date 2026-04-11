@@ -49,42 +49,76 @@ pub mod nn_train_impl {
         }
     }
 
-    /// Serialize training samples to binary file.
-    /// Format: [u32 count][TrainingSample x count]
+    /// Serialize training samples to a zstd-compressed binary file.
+    /// Format: [u32 uncompressed_size][u32 count][TrainingSample x count] (all zstd-compressed)
     pub fn save_training_data(samples: &[TrainingSample], path: &str) -> std::io::Result<()> {
         use std::fs::File;
         use std::io::{BufWriter, Write};
         let file = File::create(path)?;
         let mut writer = BufWriter::new(file);
+
+        // Pre-encode all samples to get uncompressed size
+        let mut all_data: Vec<u8> = Vec::new();
         let count = samples.len() as u32;
-        writer.write_all(&count.to_le_bytes())?;
+        all_data.extend_from_slice(&count.to_le_bytes());
         for sample in samples {
             let encoded: Vec<u8> = bincode::serialize(sample)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            writer.write_all(&(encoded.len() as u32).to_le_bytes())?;
-            writer.write_all(&encoded)?;
+            all_data.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+            all_data.extend_from_slice(&encoded);
         }
+
+        // Compress with zstd
+        let compressed = zstd::encode_all(all_data.as_slice(), 3)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        // Write uncompressed size header + compressed data
+        let uncompressed_size = all_data.len() as u32;
+        writer.write_all(&uncompressed_size.to_le_bytes())?;
+        writer.write_all(&compressed)?;
         writer.flush()?;
         Ok(())
     }
 
-    /// Deserialize training samples from binary file.
+    /// Deserialize training samples from a zstd-compressed binary file.
     pub fn load_training_data(path: &str) -> std::io::Result<Vec<TrainingSample>> {
         use std::fs::File;
         use std::io::{BufReader, Read};
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
-        let mut count_buf = [0u8; 4];
-        reader.read_exact(&mut count_buf)?;
-        let count = u32::from_le_bytes(count_buf) as usize;
+
+        // Read header: uncompressed size + compressed data
+        let mut size_buf = [0u8; 4];
+        reader.read_exact(&mut size_buf)?;
+        let uncompressed_size = u32::from_le_bytes(size_buf) as usize;
+
+        // Read rest as compressed data
+        let mut compressed_data = Vec::new();
+        reader.read_to_end(&mut compressed_data)?;
+
+        // Decompress
+        let all_data = zstd::decode_all(compressed_data.as_slice())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        if all_data.len() != uncompressed_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("decompressed size mismatch: expected {}, got {}", uncompressed_size, all_data.len())
+            ));
+        }
+
+        // Parse: [u32 count][samples...]
+        let mut offset = 0;
+        let count = u32::from_le_bytes(all_data[offset..offset+4].try_into().unwrap()) as usize;
+        offset += 4;
+
         let mut samples = Vec::with_capacity(count);
         for i in 0..count {
-            let mut size_buf = [0u8; 4];
-            reader.read_exact(&mut size_buf)?;
-            let size = u32::from_le_bytes(size_buf) as usize;
-            let mut data = vec![0u8; size];
-            reader.read_exact(&mut data)?;
-            if let Ok(sample) = bincode::deserialize(&data) {
+            let size = u32::from_le_bytes(all_data[offset..offset+4].try_into().unwrap()) as usize;
+            offset += 4;
+            let data = &all_data[offset..offset+size];
+            offset += size;
+            if let Ok(sample) = bincode::deserialize(data) {
                 samples.push(sample);
             } else {
                 eprintln!("[SelfPlayCollector] WARNING: failed to deserialize sample #{} of {}, skipping", i, count);
