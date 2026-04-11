@@ -57,7 +57,19 @@
       "Bash(grep:*)",
       "Bash(mkdir:*)",
       "Bash(cargo tree:*)",
-      "Bash(./target/release/better_rust_chinese_chess.exe)"
+      "Bash(./target/release/better_rust_chinese_chess.exe)",
+      "Skill(nimble:nimble-web-tools)",
+      "Bash(npm list:*)",
+      "Bash(npm i:*)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(git ls-remote:*)",
+      "Bash(git clone:*)",
+      "Read(//f/ccpd/**)",
+      "Read(//f/ccpd/Dataset/**)",
+      "Bash(xxd \"F:/ccpd/Dataset/中局/00000001.pgn\")",
+      "Bash(rustc --version)",
+      "Bash(cargo --version)",
+      "Bash(xxd -l 200 \"F:/ccpd/Dataset/對局/大師對局/以棋手分類/吳貴臨/00000001.pgn\")"
     ]
   }
 }

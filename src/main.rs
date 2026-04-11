@@ -1740,7 +1740,121 @@ impl Board {
         }
     }
 
-    /// Get piece at coordinate (returns None if empty or invalid)
+    /// Parse a Xiangqi FEN string and create a Board.
+    ///
+    /// Xiangqi FEN format:
+    /// `<rank9>/<rank8>/.../<rank0> <side> <castling> <halfmove> <fullmove>`
+    ///
+    /// - Each rank is read left-to-right (x=0→8), rank 0 = Black's back row (top),
+    ///   rank 9 = Red's back row (bottom).
+    /// - Uppercase = Red, lowercase = Black:
+    ///   K/k=King, A/a=Advisor, B/b=Elephant, H/h=Horses,
+    ///   R/r=Chariot, C/c=Cannon, P/p=Pawn
+    /// - Numbers = empty squares
+    ///
+    /// # Panics
+    /// Panics if the FEN string is malformed.
+    pub fn from_fen(fen: &str) -> Self {
+        let parts: Vec<&str> = fen.split_whitespace().collect();
+        assert!(!parts.is_empty(), "FEN string must not be empty");
+
+        let rank_strings: Vec<&str> = parts[0].split('/').collect();
+        assert_eq!(rank_strings.len(), 10, "FEN must have exactly 10 ranks");
+
+        let mut cells = [[None; 9]; 10];
+
+        for (rank_idx, rank_str) in rank_strings.iter().enumerate() {
+            // rank_idx 0 = Black's back row (top, y=0), 9 = Red's back row (bottom, y=9)
+            let y = rank_idx;
+            let mut x = 0;
+
+            for ch in rank_str.chars() {
+                if ch.is_ascii_digit() {
+                    let empty: usize = ch.to_digit(10).unwrap() as usize;
+                    x += empty;
+                } else {
+                    assert!(x < 9, "FEN rank '{}' overflows 9 files at char '{}'", rank_str, ch);
+                    let (color, piece_type) = match ch {
+                        'K' => (Color::Red, PieceType::King),
+                        'A' => (Color::Red, PieceType::Advisor),
+                        'B' => (Color::Red, PieceType::Elephant),
+                        'H' | 'N' => (Color::Red, PieceType::Horse),
+                        'R' => (Color::Red, PieceType::Chariot),
+                        'C' => (Color::Red, PieceType::Cannon),
+                        'P' => (Color::Red, PieceType::Pawn),
+                        'k' => (Color::Black, PieceType::King),
+                        'a' => (Color::Black, PieceType::Advisor),
+                        'b' => (Color::Black, PieceType::Elephant),
+                        'h' | 'n' => (Color::Black, PieceType::Horse),
+                        'r' => (Color::Black, PieceType::Chariot),
+                        'c' => (Color::Black, PieceType::Cannon),
+                        'p' => (Color::Black, PieceType::Pawn),
+                        _ => panic!("Unknown piece character '{}' in FEN", ch),
+                    };
+                    cells[y][x] = Some(Piece { color, piece_type });
+                    x += 1;
+                }
+            }
+            assert_eq!(x, 9, "FEN rank '{}' did not fill 9 files (got {})", rank_str, x);
+        }
+
+        // Side to move
+        let side_char = parts.get(1).copied().unwrap_or("w");
+        let current_side = match side_char {
+            "w" => Color::Red,
+            "b" => Color::Black,
+            _ => panic!("FEN side must be 'w' or 'b', got '{}'", side_char),
+        };
+
+        // Build initial zobrist key (piece-only; the side hash will be XORed
+        // by make_move() when the side actually changes, so we include it here
+        // for the initial position to stay consistent with Board::new())
+        let zobrist = get_zobrist();
+        let mut zobrist_key = 0u64;
+        #[allow(clippy::needless_range_loop)]
+        for y in 0..10 {
+            #[allow(clippy::needless_range_loop)]
+            for x in 0..9 {
+                if let Some(piece) = cells[y][x] {
+                    let pos_idx = zobrist.pos_idx(Coord::new(x as i8, y as i8));
+                    zobrist_key ^= zobrist.pieces[pos_idx][piece.color as usize][piece.piece_type as usize];
+                }
+            }
+        }
+        // Include side hash to match Board::new() behavior (side XOR included in starting zobrist)
+        zobrist_key ^= zobrist.side;
+
+        let mut repetition_history = HashMap::new();
+        repetition_history.insert(zobrist_key, 1);
+
+        // Scan for king positions to populate cache
+        let mut king_pos = [None; 2];
+        #[allow(clippy::needless_range_loop)]
+        for y in 0..10 {
+            #[allow(clippy::needless_range_loop)]
+            for x in 0..9 {
+                if let Some(Piece { color, piece_type }) = cells[y][x]
+                    && piece_type == PieceType::King
+                {
+                    let idx = match color {
+                        Color::Red => 0,
+                        Color::Black => 1,
+                    };
+                    king_pos[idx] = Some(Coord::new(x as i8, y as i8));
+                }
+            }
+        }
+
+        Board {
+            cells,
+            zobrist_key,
+            current_side,
+            rule_set: RuleSet::Official,
+            move_history: Vec::with_capacity(200),
+            repetition_history,
+            king_pos: RefCell::new(king_pos),
+        }
+    }
     #[inline(always)]
     pub fn get(&self, coord: Coord) -> Option<Piece> {
         if coord.is_valid() {
@@ -2338,6 +2452,8 @@ mod eval;
 mod nn_eval;
 #[cfg(feature = "train")]
 mod nn_train;
+#[cfg(feature = "train")]
+mod pgn_converter;
 
 // =============================================================================
 // SEARCH ALGORITHMS
@@ -3407,8 +3523,9 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
         println!("2. 从文件加载数据训练 (Phase 1)");
         println!("3. 继续训练 (Phase 2 自对局微调)");
         println!("4. 导出棋谱为训练数据");
-        println!("5. 返回主菜单");
-        print!("请选择（1-5）：");
+        println!("5. 从PGN文件导入训练数据");
+        println!("6. 返回主菜单");
+        print!("请选择（1-6）：");
         io::stdout().flush()?;
 
         input.clear();
@@ -3622,7 +3739,42 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
                     eprintln!("导出成功！");
                 }
             }
-            5 => break,
+            5 => {
+                // PGN → TrainingData converter
+                println!("\n【从PGN文件导入训练数据】");
+                print!("PGN目录（例如 F:/ccpd/Dataset/對局）：");
+                io::stdout().flush()?;
+                input.clear();
+                stdin.read_line(input)?;
+                let pgn_dir = input.trim().to_string();
+                if pgn_dir.is_empty() {
+                    println!("无效路径！");
+                    continue;
+                }
+
+                print!("输出文件路径（例如 F:/training_data/games.bin）：");
+                io::stdout().flush()?;
+                input.clear();
+                stdin.read_line(input)?;
+                let output_path = input.trim().to_string();
+                if output_path.is_empty() {
+                    println!("无效路径！");
+                    continue;
+                }
+
+                print!("最大处理文件数（0=全部，默认1000）：");
+                io::stdout().flush()?;
+                input.clear();
+                stdin.read_line(input)?;
+                let max_files: usize = input.trim().parse().unwrap_or(1000);
+
+                eprintln!("\n=== PGN 导入中 ===");
+                match pgn_converter::load_pgn_dataset(&pgn_dir, &output_path, max_files) {
+                    Ok(count) => eprintln!("导入完成，共 {} 个局面", count),
+                    Err(e) => eprintln!("导入失败: {}", e),
+                }
+            }
+            6 => break,
             _ => {
                 println!("无效选择！");
             }

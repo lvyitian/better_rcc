@@ -312,6 +312,7 @@ dependencies = [
  "burn-ndarray",
  "burn-nn",
  "burn-optim",
+ "encoding_rs",
  "ndarray 0.16.1",
  "rand 0.8.5",
  "serde",
@@ -2271,6 +2272,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c4c685bbef7fe13c3c6dd4da26841ed3980ef33e841cddfa15ce8a8fb3f1884"
 dependencies = [
  "embedded-hal 1.0.0",
+]
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]
