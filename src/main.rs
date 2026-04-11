@@ -2450,6 +2450,7 @@ impl fmt::Display for Board {
 /// The evaluation function estimates who's winning a position without searching.
 mod eval;
 mod nn_eval;
+mod nnue_input;
 #[cfg(feature = "train")]
 mod nn_train;
 #[cfg(feature = "train")]
