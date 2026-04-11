@@ -23,7 +23,7 @@ side_offset = 0 for Red, 630 for Black
 global_index = side_offset + index
 ```
 
-Piece types: King(0), Advisor(1), Elephant(2), Horse(3), Chariot(4), Cannon(5), Pawn(6)
+Piece types: King(0), Advisor(1), Elephant(2), Pawn(3), Horse(4), Cannon(5), Chariot(6)
 
 **Dual-perspective inputs** (matching bullet's `dual_perspective()`):
 - `stm` (side-to-move): Red at base 0, Black at base 630
