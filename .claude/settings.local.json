@@ -55,7 +55,9 @@
       "Bash(python3:*)",
       "Bash(grep -r \"pub struct BatchNorm\" ~/.cargo/registry/src/*/burn-0.21.0-pre.3/src/)",
       "Bash(grep:*)",
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(cargo tree:*)",
+      "Bash(./target/release/better_rust_chinese_chess.exe)"
     ]
   }
 }

@@ -1365,7 +1365,11 @@ pub mod movegen {
     pub fn is_legal_move(board: &mut Board, action: Action, side: Color) -> (bool, bool) {
         let src = action.src;
         let tar = action.tar;
-        let piece = board.get(src).unwrap();
+        // Must have a piece to move — return false if src is empty
+        let piece = match board.get(src) {
+            Some(p) => p,
+            None => return (false, false),
+        };
         let captured = action.captured;
 
         board.cells[tar.y as usize][tar.x as usize] = Some(piece);
@@ -1858,12 +1862,14 @@ impl Board {
     /// is consistent. The action's captured field holds what was taken.
     pub fn undo_move(&mut self, action: Action) {
         // Decrement or remove repetition count
-        *self.repetition_history.get_mut(&self.zobrist_key).unwrap() -= 1;
-        if self.repetition_history[&self.zobrist_key] == 0 {
-            self.repetition_history.remove(&self.zobrist_key);
+        if let Some(count) = self.repetition_history.get_mut(&self.zobrist_key) {
+            *count -= 1;
+            if *count == 0 {
+                self.repetition_history.remove(&self.zobrist_key);
+            }
         }
 
-        let piece = self.get(action.tar).unwrap();
+        let piece = self.get(action.tar).expect("undo_move: tar square must not be empty");
         self.set_internal(action.src, Some(piece));
         self.set_internal(action.tar, action.captured);
 

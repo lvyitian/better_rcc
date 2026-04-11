@@ -78,7 +78,7 @@ pub mod nn_train_impl {
         reader.read_exact(&mut count_buf)?;
         let count = u32::from_le_bytes(count_buf) as usize;
         let mut samples = Vec::with_capacity(count);
-        for _ in 0..count {
+        for i in 0..count {
             let mut size_buf = [0u8; 4];
             reader.read_exact(&mut size_buf)?;
             let size = u32::from_le_bytes(size_buf) as usize;
@@ -86,6 +86,8 @@ pub mod nn_train_impl {
             reader.read_exact(&mut data)?;
             if let Ok(sample) = bincode::deserialize(&data) {
                 samples.push(sample);
+            } else {
+                eprintln!("[SelfPlayCollector] WARNING: failed to deserialize sample #{} of {}, skipping", i, count);
             }
         }
         Ok(samples)
