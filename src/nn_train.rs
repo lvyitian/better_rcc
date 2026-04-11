@@ -307,10 +307,14 @@ pub mod nn_train_impl {
             let score_out = net.score_head.forward(dense_out);
 
             // Extract scalar from [1, 1] tensor
+            // NOTE: No tanh here — matches train_supervised forward path which uses
+            // raw score_out directly (divided by 400). The tanh+scale was removed
+            // because it created a train/val normalization mismatch: train used
+            // raw_score/400 while val used tanh(raw_score)*400/400.
             let score_raw: f32 = score_out.to_data().as_slice().expect("expected 1x1")[0];
-            let nn_score = score_raw.tanh() * 400.0;
+            let nn_score = score_raw / 400.0;
 
-            let loss = (nn_score / 400.0 - sample.label).powi(2);
+            let loss = (nn_score - sample.label).powi(2);
             total_loss += loss;
         }
         total_loss / val_data.len() as f32
