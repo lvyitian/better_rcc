@@ -4359,8 +4359,8 @@ mod tests {
         let capture_pawn2 = Action::new(Coord::new(0, 0), Coord::new(1, 1), Some(Piece { color: Color::Black, piece_type: PieceType::Pawn }));
 
         assert!(capture_chariot.mvv_lva_score() > capture_horse.mvv_lva_score());
-        assert!(capture_horse.mvv_lva_score() >= capture_cannon.mvv_lva_score());  // Horse ≥ Cannon (both conditional)
-        assert!(capture_cannon.mvv_lva_score() > capture_advisor.mvv_lva_score());
+        assert!(capture_cannon.mvv_lva_score() > capture_horse.mvv_lva_score());  // Cannon > Horse (both conditional)
+        assert!(capture_horse.mvv_lva_score() >= capture_advisor.mvv_lva_score());
         assert!(capture_advisor.mvv_lva_score() > capture_elephant.mvv_lva_score());
         assert!(capture_elephant.mvv_lva_score() >= capture_pawn2.mvv_lva_score()); // Elephant >= Pawn
     }
