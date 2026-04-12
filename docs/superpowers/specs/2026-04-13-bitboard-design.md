@@ -26,23 +26,24 @@ Refactor the Chinese Chess engine from a 2D array board representation (`[[Optio
 
 ### 2.1 Board Representation
 
-**10×10 padded board** — `y=0-9, x=0-9` (10 columns, 10 rows, all real squares):
+**9×10 unpadded board** — `y=0-9, x=0-8` (standard Xiangqi board, 90 squares):
 
 ```
-     x=0  x=1  x=2  x=3  x=4  x=5  x=6  x=7  x=8  x=9
-y=0    0    1    2    3    4    5    6    7    8    9
-y=1   10   11   12   13   14   15   16   17   18   19
-y=2   20   21   22   23   24   25   26   27   28   29
-y=3   30   31   32   33   34   35   36   37   38   39
-y=4   40   41   42   43   44   45   46   47   48   49
-y=5   50   51   52   53   54   55   56   57   58   59
-y=6   60   61   62   63   64   65   66   67   68   69
-y=7   70   71   72   73   74   75   76   77   78   79
-y=8   80   81   82   83   84   85   86   87   88   89
-y=9   90   91   92   93   94   95   96   97   98   99
+    x=0  x=1  x=2  x=3  x=4  x=5  x=6  x=7  x=8
+y=0    0    1    2    3    4    5    6    7    8
+y=1    9   10   11   12   13   14   15   16   17
+y=2   18   19   20   21   22   23   24   25   26
+y=3   27   28   29   30   31   32   33   34   35
+y=4   36   37   38   39   40   41   42   43   44
+y=5   45   46   47   48   49   50   51   52   53
+y=6   54   55   56   57   58   59   60   61   62
+y=7   63   64   65   66   67   68   69   70   71
+y=8   72   73   74   75   76   77   78   79   80
+y=9   81   82   83   84   85   86   87   88   89
 ```
 
-**Bit index formula:** `sq = y * 10 + x`
+**Bit index formula:** `sq = y * 9 + x`
+**Unused bits 90-127** (top 38 bits of u128) are always 0.
 
 All 100 squares (0-99) are real board squares. No padding bits are used in this design.
 
@@ -64,33 +65,33 @@ pub struct Bitboards {
 ```rust
 /// chariot_rays[sq][dir] = u128 mask of squares in cardinal direction
 /// dir: 0=North(+y), 1=South(-y), 2=East(+x), 3=West(-x)
-pub static CHARIOT_RAYS: [[u128; 4]; 100] = ...;
+pub static CHARIOT_RAYS: [[u128; 4]; 90] = ...;
 
 /// cannon_screens[sq][dir] = u128 mask of squares between src and first piece
-pub static CANNON_SCREENS: [[u128; 4]; 100] = ...;
+pub static CANNON_SCREENS: [[u128; 4]; 90] = ...;
 
 /// horse_attacks[sq][horse_delta_idx] = u128 mask (usually 1 bit)
-pub static HORSE_ATTACKS: [[u128; 8]; 100] = ...;
+pub static HORSE_ATTACKS: [[u128; 8]; 90] = ...;
 
 /// advisor_attacks[sq][dir] = u128 mask
-pub static ADVISOR_ATTACKS: [[u128; 4]; 100] = ...;
+pub static ADVISOR_ATTACKS: [[u128; 4]; 90] = ...;
 
 /// elephant_attacks[sq][dir] = u128 mask
-pub static ELEPHANT_ATTACKS: [[u128; 4]; 100] = ...;
+pub static ELEPHANT_ATTACKS: [[u128; 4]; 90] = ...;
 
 /// king_attacks[sq] = u128 mask
-pub static KING_ATTACKS: [u128; 100] = ...;
+pub static KING_ATTACKS: [u128; 90] = ...;
 ```
 
 **Size of tables:**
-- CHARIOT_RAYS: 100 × 4 × 16 = 6,400 bytes
-- CANNON_SCREENS: 100 × 4 × 16 = 6,400 bytes
-- HORSE_ATTACKS: 100 × 8 × 16 = 12,800 bytes
-- ADVISOR_ATTACKS: 100 × 4 × 16 = 6,400 bytes
-- ELEPHANT_ATTACKS: 100 × 4 × 16 = 6,400 bytes
-- KING_ATTACKS: 100 × 16 = 1,600 bytes
+- CHARIOT_RAYS: 90 × 4 × 16 = 5,760 bytes
+- CANNON_SCREENS: 90 × 4 × 16 = 5,760 bytes
+- HORSE_ATTACKS: 90 × 8 × 16 = 11,520 bytes
+- ADVISOR_ATTACKS: 90 × 4 × 16 = 5,760 bytes
+- ELEPHANT_ATTACKS: 90 × 4 × 16 = 5,760 bytes
+- KING_ATTACKS: 90 × 16 = 1,440 bytes
 
-**Total static tables:** ~40 KB — computed once at compile time via const initializer.
+**Total static tables:** ~36 KB — computed once at compile time via const initializer.
 
 ---
 
@@ -256,12 +257,12 @@ impl Bitboards {
 ```rust
 #[inline(always)]
 pub fn sq_from_coord(x: i8, y: i8) -> u8 {
-    (y * 10 + x) as u8
+    (y * 9 + x) as u8
 }
 
 #[inline(always)]
 pub fn coord_from_sq(sq: u8) -> Coord {
-    Coord::new((sq % 10) as i8, (sq / 10) as i8)
+    Coord::new((sq % 9) as i8, (sq / 9) as i8)
 }
 ```
 
@@ -399,7 +400,6 @@ src/
   nnue_input.rs      (MOD) Add Bitboards::to_nnue_input() method
   nn_eval.rs         (MOD) Swap NNInputPlanes source
   pgn_converter.rs   (MOD) Use bitboard FEN serialization
-  board_fen.rs       (NEW) FEN parsing/generation helpers using bitboards
 ```
 
 ---
