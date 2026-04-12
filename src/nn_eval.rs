@@ -180,8 +180,46 @@ use crate::nnue_input::{INPUT_DIM, FT_DIM, NUM_BUCKETS, QA, QB, SCALE, bucket_in
 /// Feature transform output: 512 i16 values, cache-line aligned for SIMD.
 #[repr(C, align(64))]
 #[derive(Clone)]
-struct Accumulator {
-    vals: [i16; FT_DIM],
+pub struct Accumulator {
+    pub vals: [i16; FT_DIM],
+}
+
+impl serde::Serialize for Accumulator {
+    fn serialize<S>(&self, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.vals.serialize(ser)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Accumulator {
+    fn deserialize<D>(de: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = [i16; FT_DIM];
+            fn expecting(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(fmt, "an array of {} i16 values", FT_DIM)
+            }
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut arr = [0i16; FT_DIM];
+                for i in 0..FT_DIM {
+                    arr[i] = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::custom("too few elements"))?;
+                }
+                Ok(arr)
+            }
+        }
+        let vals = de.deserialize_seq(V)?;
+        Ok(Accumulator { vals })
+    }
 }
 
 impl Accumulator {
@@ -202,19 +240,18 @@ fn screlu(x: i16) -> i32 {
 pub struct NNUEFeedForward {
     /// Feature transform weights: [INPUT_DIM][FT_DIM] stored as 1260 Accumulators (column-major).
     /// Each column f has weights for feature f across all 512 hidden units.
-    ft_weights: Vec<Accumulator>,
+    pub ft_weights: Vec<Accumulator>,
     /// Feature transform bias: [FT_DIM], QA quantized.
-    ft_bias: [i16; FT_DIM],
+    pub ft_bias: [i16; FT_DIM],
     /// Output layer weights: [NUM_BUCKETS][FT_DIM * 2] for bucketized output.
     /// Each bucket has 1024 = 512 (stm) + 512 (ntm) inputs.
-    out_weights: [[i16; FT_DIM * 2]; NUM_BUCKETS],
+    pub out_weights: [[i16; FT_DIM * 2]; NUM_BUCKETS],
     /// Output layer bias: [NUM_BUCKETS], QA * QB quantized.
-    out_bias: [i16; NUM_BUCKETS],
+    pub out_bias: [i16; NUM_BUCKETS],
 }
 
-#[allow(dead_code)]
 impl NNUEFeedForward {
-    /// Create with zero-initialized weights (for loading from checkpoint).
+    /// Create with zero-initialized weights.
     pub fn new() -> Self {
         Self {
             ft_weights: vec![Accumulator::zero(); INPUT_DIM],
@@ -248,6 +285,163 @@ impl NNUEFeedForward {
         let out_bias = [rand_i16(); NUM_BUCKETS];
 
         Self { ft_weights, ft_bias, out_weights, out_bias }
+    }
+
+    /// Serialize this network to a byte vector using bincode.
+    /// Flattens arrays into Vecs for compatibility with bincode.
+    #[allow(dead_code)]
+    pub fn to_bytes(&self) -> std::io::Result<Vec<u8>> {
+        // Flatten ft_weights: [INPUT_DIM][FT_DIM] → Vec<i16>
+        let ft_weights_flat: Vec<i16> = self
+            .ft_weights
+            .iter()
+            .flat_map(|acc| acc.vals.iter().copied())
+            .collect();
+        // Flatten out_weights: [[i16; FT_DIM*2]; NUM_BUCKETS] → Vec<i16>
+        let out_weights_flat: Vec<i16> = self
+            .out_weights
+            .iter()
+            .flat_map(|bucket| bucket.iter().copied())
+            .collect();
+        let data = (
+            ft_weights_flat,
+            self.ft_bias.to_vec(),
+            out_weights_flat,
+            self.out_bias.to_vec(),
+        );
+        bincode::serialize(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    /// Deserialize network from a byte vector.
+    pub fn from_bytes(data: &[u8]) -> std::io::Result<Self> {
+        let (ft_weights_flat, ft_bias, out_weights_flat, out_bias): (
+            Vec<i16>,
+            Vec<i16>,
+            Vec<i16>,
+            Vec<i16>,
+        ) = bincode::deserialize(data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        // Reconstruct ft_weights: Vec<i16> → Vec<Accumulator>
+        if ft_weights_flat.len() != INPUT_DIM * FT_DIM {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "ft_weights_flat size {} != {}*{}",
+                    ft_weights_flat.len(),
+                    INPUT_DIM,
+                    FT_DIM
+                ),
+            ));
+        }
+        let mut ft_weights = Vec::with_capacity(INPUT_DIM);
+        for f in 0..INPUT_DIM {
+            let mut vals = [0i16; FT_DIM];
+            for i in 0..FT_DIM {
+                vals[i] = ft_weights_flat[f * FT_DIM + i];
+            }
+            ft_weights.push(Accumulator { vals });
+        }
+
+        if ft_bias.len() != FT_DIM {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("ft_bias size {} != FT_DIM {}", ft_bias.len(), FT_DIM),
+            ));
+        }
+        let mut ft_bias_arr = [0i16; FT_DIM];
+        ft_bias_arr.copy_from_slice(&ft_bias);
+
+        // Reconstruct out_weights: Vec<i16> → [[i16; FT_DIM*2]; NUM_BUCKETS]
+        if out_weights_flat.len() != NUM_BUCKETS * FT_DIM * 2 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "out_weights_flat size {} != {}*{}*2",
+                    out_weights_flat.len(),
+                    NUM_BUCKETS,
+                    FT_DIM
+                ),
+            ));
+        }
+        let mut out_weights = [[0i16; FT_DIM * 2]; NUM_BUCKETS];
+        for b in 0..NUM_BUCKETS {
+            for i in 0..FT_DIM * 2 {
+                out_weights[b][i] = out_weights_flat[b * FT_DIM * 2 + i];
+            }
+        }
+
+        if out_bias.len() != NUM_BUCKETS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("out_bias size {} != NUM_BUCKETS {}", out_bias.len(), NUM_BUCKETS),
+            ));
+        }
+        let mut out_bias_arr = [0i16; NUM_BUCKETS];
+        out_bias_arr.copy_from_slice(&out_bias);
+
+        Ok(NNUEFeedForward {
+            ft_weights,
+            ft_bias: ft_bias_arr,
+            out_weights,
+            out_bias: out_bias_arr,
+        })
+    }
+
+    /// Load network from a binary file.
+    /// First tries zstd decompression (new format), falls back to raw bincode (old format).
+    /// Prints a warning and falls back to random if the file doesn't exist or fails to load.
+    pub fn load_from_file(path: &str) -> Self {
+        match Self::from_file_impl(path) {
+            Ok(net) => net,
+            Err(e) => {
+                eprintln!(
+                    "[NNUE] WARNING: failed to load network from '{}': {e}; using random weights",
+                    path
+                );
+                Self::random()
+            }
+        }
+    }
+
+    pub fn from_file_impl(path: &str) -> std::io::Result<Self> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)?;
+
+        // Try zstd decompression first (new format with 4-byte raw size header)
+        if data.len() >= 4 {
+            let raw_size = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
+            let compressed = &data[4..];
+            if let Ok(decompressed) = zstd::decode_all(compressed) {
+                if decompressed.len() == raw_size {
+                    eprintln!("[NNUE] loaded weights from '{}' (zstd)", path);
+                    return Self::from_bytes(&decompressed);
+                }
+            }
+        }
+
+        // Fall back to raw bincode (no compression, e.g. old saves)
+        eprintln!("[NNUE] loaded weights from '{}' (raw)", path);
+        Self::from_bytes(&data)
+    }
+
+    /// Serialize and zstd-compress to a file.
+    /// Format on disk: [u32 raw_size][zstd compressed bincode(data)].
+    #[allow(dead_code)]
+    pub fn save_to_file(&self, path: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        let raw = self.to_bytes()?;
+        let compressed = zstd::encode_all(raw.as_slice(), 3)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let raw_size = raw.len() as u32;
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(&raw_size.to_le_bytes())?;
+        file.write_all(&compressed)?;
+        file.flush()?;
+        Ok(())
     }
 
     /// Compute accumulators for stm and ntm inputs.
@@ -352,8 +546,10 @@ impl Default for NNUEFeedForward {
 #[allow(dead_code)]
 #[derive(Module, Debug)]
 pub struct NNUEFeedForwardBurn<B: Backend = burn_ndarray::NdArray<f32>> {
-    ft: burn::nn::Linear<B>,
-    out: burn::nn::Linear<B>,
+    /// Feature transform: 1260 → 512 linear layer
+    pub ft: burn::nn::Linear<B>,
+    /// Output: 1024 → 8 bucket linear layer
+    pub out: burn::nn::Linear<B>,
 }
 
 #[cfg(feature = "train")]
@@ -483,10 +679,9 @@ pub struct NNOutput {
     pub correction: f32,
 }
 
-/// Global NN instance (ndarray version), lazily initialized.
-#[cfg(not(feature = "train"))]
+/// Global NN instance, lazily initialized from file if present, random otherwise.
 static NN_NET: std::sync::LazyLock<NNUEFeedForward> =
-    std::sync::LazyLock::new(NNUEFeedForward::random);
+    std::sync::LazyLock::new(|| NNUEFeedForward::load_from_file("nn_weights.bin"));
 
 /// Hybrid NN + handcrafted evaluation.
 ///
@@ -505,19 +700,6 @@ pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) 
     let (_stm, _ntm) = NNInputPlanes::from_board(board);
     let _non_king_count = crate::nnue_input::count_non_king_pieces(board);
 
-    #[cfg(feature = "train")]
-    let output = {
-        // For training, we would use NNUEFeedForwardBurn
-        // For now, fall back to handcrafted only in train mode before Task 4
-        NNOutput {
-            alpha: 1.0,
-            beta: 0.0,
-            nn_score: 0.0,
-            correction: 0.0,
-        }
-    };
-
-    #[cfg(not(feature = "train"))]
     let output = NN_NET.forward_output(&_stm.data, &_ntm.data, _non_king_count);
 
     // Fixed 75% NN / 25% handcrafted blend.
@@ -606,5 +788,24 @@ mod tests {
         let debug_str = format!("{:?}", out);
         assert!(debug_str.contains("alpha"));
         assert!(debug_str.contains("nn_score"));
+    }
+
+    #[test]
+    fn test_nnue_to_from_bytes() {
+        let net = NNUEFeedForward::random();
+        let bytes = net.to_bytes().unwrap();
+        let loaded = NNUEFeedForward::from_bytes(&bytes).unwrap();
+
+        // Check ft_bias
+        assert_eq!(net.ft_bias, loaded.ft_bias);
+        // Check out_bias
+        assert_eq!(net.out_bias, loaded.out_bias);
+        // Check out_weights
+        assert_eq!(net.out_weights, loaded.out_weights);
+        // Check ft_weights
+        assert_eq!(net.ft_weights.len(), loaded.ft_weights.len());
+        for (a, b) in net.ft_weights.iter().zip(loaded.ft_weights.iter()) {
+            assert_eq!(a.vals, b.vals);
+        }
     }
 }

@@ -362,11 +362,97 @@ pub mod nn_train_impl {
     // NETWORK SAVE / LOAD
     // =============================================================================
 
-    /// Save network weights to a binary file using burn's CompactRecorder.
+    /// Save network weights to two files:
+    /// - `path` (e.g. "nn_weights.mpk") — burn's CompactRecorder format (used for resuming training)
+    /// - "nn_weights.bin" — zstd-compressed raw ndarray format (used by inference at runtime)
     pub fn save_network(net: &NNUEFeedForwardBurn<TrainBackend>, path: &str) -> std::io::Result<()> {
         use burn::record::CompactRecorder;
+        // Save in burn format for resuming training
         (*net).clone().save_file(path, &CompactRecorder::new())
-            .map_err(std::io::Error::other)
+            .map_err(std::io::Error::other)?;
+
+        // Also export raw ndarray weights to nn_weights.bin (zstd-compressed)
+        let raw_bytes = burn_weights_to_ndarray_bytes(net)?;
+        let compressed = zstd::encode_all(raw_bytes.as_slice(), 3)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let raw_size = raw_bytes.len() as u32;
+        let mut file = std::fs::File::create("nn_weights.bin")?;
+        use std::io::Write;
+        file.write_all(&raw_size.to_le_bytes())?;
+        file.write_all(&compressed)?;
+        file.flush()?;
+        Ok(())
+    }
+
+    /// Convert a burn-trained network's weights to the raw ndarray format bytes.
+    ///
+    /// Burn Linear weights are `[d_output, d_input]` in memory.
+    /// NNUEFeedForward uses QA-quantized i16 arranged as:
+    ///   - ft_weights: [INPUT_DIM][FT_DIM]  (each row = one feature's FT output over 1260 inputs)
+    ///   - out_weights: [[i16; FT_DIM*2]; NUM_BUCKETS]  (each bucket row)
+    /// The burn → ndarray conversion:
+    ///   - ft.weight: burn [512, 1260] → ndarray: transpose to [1260][512], then QA-quantize to i16
+    ///   - out.weight: burn [8, 1024]  → [8][1024] as f32, quantized to i16
+    ///
+    /// The output format is identical to `NNUEFeedForward::to_bytes()`:
+    ///   (ft_weights_flat: Vec<i16>, ft_bias: Vec<i16>, out_weights_flat: Vec<i16>, out_bias: Vec<i16>)
+    pub fn burn_weights_to_ndarray_bytes(
+        net: &NNUEFeedForwardBurn<TrainBackend>,
+    ) -> std::io::Result<Vec<u8>> {
+        use crate::nnue_input::{FT_DIM, INPUT_DIM, NUM_BUCKETS, QA};
+
+        // ft.weight shape: [512, 1260] in burn
+        let ft_weight_data: Vec<f32> = net.ft.weight.to_data().as_slice::<f32>().unwrap().to_vec();
+        let ft_bias_data: Vec<f32> = net.ft.bias.as_ref()
+            .expect("ft bias should exist")
+            .to_data()
+            .as_slice::<f32>().unwrap().to_vec();
+
+        // out.weight shape: [8, 1024] in burn
+        let out_weight_data: Vec<f32> = net.out.weight.to_data().as_slice::<f32>().unwrap().to_vec();
+        let out_bias_data: Vec<f32> = net.out.bias.as_ref()
+            .expect("out bias should exist")
+            .to_data()
+            .as_slice::<f32>().unwrap().to_vec();
+
+        // ft.weight [512, 1260] → transpose to [1260, 512] = inference's ft_weights
+        // burn index = row * 1260 + col = i * 1260 + f → we want [f, i] in inference layout
+        let mut ft_weights_flat = Vec::with_capacity(INPUT_DIM * FT_DIM);
+        for f in 0..INPUT_DIM {
+            for i in 0..FT_DIM {
+                let w = ft_weight_data[i * INPUT_DIM + f];
+                let w_i16 = (w.round() as i32).clamp(-i32::from(QA), i32::from(QA)) as i16;
+                ft_weights_flat.push(w_i16);
+            }
+        }
+
+        let mut ft_bias_i16 = Vec::with_capacity(FT_DIM);
+        for i in 0..FT_DIM {
+            let w = ft_bias_data[i];
+            let w_i16 = (w.round() as i32).clamp(-i32::from(QA), i32::from(QA)) as i16;
+            ft_bias_i16.push(w_i16);
+        }
+
+        // out.weight [8, 1024] → row-major [8][1024] (no transpose needed)
+        let mut out_weights_flat = Vec::with_capacity(NUM_BUCKETS * FT_DIM * 2);
+        for b in 0..NUM_BUCKETS {
+            for i in 0..FT_DIM * 2 {
+                let w = out_weight_data[b * (FT_DIM * 2) + i];
+                let w_i16 = (w.round() as i32).clamp(-i32::from(QA), i32::from(QA)) as i16;
+                out_weights_flat.push(w_i16);
+            }
+        }
+
+        let mut out_bias_i16 = Vec::with_capacity(NUM_BUCKETS);
+        for i in 0..NUM_BUCKETS {
+            let w = out_bias_data[i];
+            let w_i16 = (w.round() as i32).clamp(-i32::from(QA), i32::from(QA)) as i16;
+            out_bias_i16.push(w_i16);
+        }
+
+        let data = (ft_weights_flat, ft_bias_i16, out_weights_flat, out_bias_i16);
+        bincode::serialize(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
     /// Load network weights from a binary file.
@@ -379,6 +465,57 @@ pub mod nn_train_impl {
             .map_err(std::io::Error::other)?;
         let net = NNUEFeedForwardBurn::new();
         Ok(net.load_record(record))
+    }
+
+    /// Create a burn network from ndarray bytes (bin format).
+    /// Dequantizes i16 → f32, transposes weights back to burn layout [d_output, d_input].
+    pub fn create_net_from_ndarray_bytes(bytes: &[u8]) -> std::io::Result<NNUEFeedForwardBurn<TrainBackend>> {
+        use crate::nnue_input::{INPUT_DIM, FT_DIM, NUM_BUCKETS};
+        use burn::tensor::TensorData;
+
+        let (ft_weights_flat, ft_bias, out_weights_flat, out_bias): (
+            Vec<i16>, Vec<i16>, Vec<i16>, Vec<i16>,
+        ) = bincode::deserialize(bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        let device = <TrainBackend as Backend>::Device::default();
+
+        // Dequantize and transpose: inference [f][i] → burn [i][f]
+        let mut ft_transposed = Vec::with_capacity(FT_DIM * INPUT_DIM);
+        for i in 0..FT_DIM {
+            for f in 0..INPUT_DIM {
+                ft_transposed.push(f32::from(ft_weights_flat[f * FT_DIM + i]));
+            }
+        }
+        let ft_weight_tensor: Tensor<TrainBackend, 2> = Tensor::from_data(
+            TensorData::new(ft_transposed, [FT_DIM, INPUT_DIM]), &device
+        );
+        let ft_bias_tensor: Tensor<TrainBackend, 1> = Tensor::from_data(
+            TensorData::new(ft_bias.iter().map(|&w| f32::from(w)).collect::<Vec<_>>(), [FT_DIM]), &device
+        );
+
+        // out.weight: [[i16; 1024]; 8] → [8, 1024] (row-major)
+        let out_weight_data: Vec<f32> = out_weights_flat.iter().map(|&w| f32::from(w)).collect();
+        let out_weight_tensor: Tensor<TrainBackend, 2> = Tensor::from_data(
+            TensorData::new(out_weight_data, [NUM_BUCKETS, FT_DIM * 2]), &device
+        );
+        let out_bias_tensor: Tensor<TrainBackend, 1> = Tensor::from_data(
+            TensorData::new(out_bias.iter().map(|&w| f32::from(w)).collect::<Vec<_>>(), [NUM_BUCKETS]), &device
+        );
+
+        // Create fresh Linear layers and directly assign tensors to their pub fields
+        let mut ft_linear = burn::nn::LinearConfig::new(INPUT_DIM, FT_DIM).with_bias(true).init(&device);
+        let mut out_linear = burn::nn::LinearConfig::new(FT_DIM * 2, NUM_BUCKETS).with_bias(true).init(&device);
+
+        // Create Param from tensor using Param::initialized with a fresh ParamId
+        use burn::module::Param;
+        use burn::module::ParamId;
+        ft_linear.weight = Param::initialized(ParamId::new(), ft_weight_tensor);
+        ft_linear.bias = Some(Param::initialized(ParamId::new(), ft_bias_tensor));
+        out_linear.weight = Param::initialized(ParamId::new(), out_weight_tensor);
+        out_linear.bias = Some(Param::initialized(ParamId::new(), out_bias_tensor));
+
+        Ok(NNUEFeedForwardBurn { ft: ft_linear, out: out_linear })
     }
 
     // =============================================================================

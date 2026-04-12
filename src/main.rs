@@ -3516,7 +3516,7 @@ fn run_one_game(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dyn std
 #[cfg(feature = "train")]
 fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dyn std::error::Error>> {
     use nn_train::nn_train_impl::*;
-    use crate::nn_eval::NNUEFeedForwardBurn;
+    use crate::nn_eval::{NNUEFeedForwardBurn, NNUEFeedForward};
 
     loop {
         println!("\n【训练模式】");
@@ -3526,7 +3526,9 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
         println!("4. 导出棋谱为训练数据");
         println!("5. 从PGN文件导入训练数据");
         println!("6. 返回主菜单");
-        print!("请选择（1-6）：");
+        println!("7. 将 nn_weights.mpk 转换为 nn_weights.bin");
+        println!("8. 将 nn_weights.bin 转换为 nn_weights.mpk");
+        print!("请选择（1-8）：");
         io::stdout().flush()?;
 
         input.clear();
@@ -3587,11 +3589,11 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
                 let mut net = NNUEFeedForwardBurn::<TrainBackend>::new();
                 train_supervised(&mut net, train_samples, val_samples, epochs, batch_size, lr);
 
-                let path = "nn_weights.bin";
+                let path = "nn_weights.mpk";
                 if let Err(e) = save_network(&net, path) {
                     eprintln!("保存权重失败: {}", e);
                 } else {
-                    eprintln!("权重已保存到 {}", path);
+                    eprintln!("权重已保存到 {}（以及 nn_weights.bin inference 文件）", path);
                 }
             }
             2 => {
@@ -3625,18 +3627,18 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
                 let mut net = NNUEFeedForwardBurn::<TrainBackend>::new();
                 train_supervised(&mut net, train_samples, val_samples, epochs, batch_size, lr);
 
-                let save_path = "nn_weights.bin";
+                let save_path = "nn_weights.mpk";
                 if let Err(e) = save_network(&net, save_path) {
                     eprintln!("保存权重失败: {}", e);
                 } else {
-                    eprintln!("权重已保存到 {}", save_path);
+                    eprintln!("权重已保存到 {}（以及 nn_weights.bin inference 文件）", save_path);
                 }
             }
             3 => {
-                let path = "nn_weights.bin";
-                let mut net = match load_network(path) {
+                let mpk_path = "nn_weights.mpk";
+                let mut net = match load_network(mpk_path) {
                     Ok(n) => {
-                        eprintln!("已加载现有权重 from {}", path);
+                        eprintln!("已加载现有权重 from {}", mpk_path);
                         n
                     }
                     Err(e) => {
@@ -3694,10 +3696,10 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
 
                 train_selfplay(&mut net, train_samples, val_samples, epochs, batch_size, lr);
 
-                if let Err(e) = save_network(&net, path) {
+                if let Err(e) = save_network(&net, mpk_path) {
                     eprintln!("保存权重失败: {}", e);
                 } else {
-                    eprintln!("权重已保存到 {}", path);
+                    eprintln!("权重已保存到 {}（以及 nn_weights.bin inference 文件）", mpk_path);
                 }
             }
             4 => {
@@ -3776,6 +3778,66 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
                 }
             }
             6 => break,
+            7 => {
+                // mpk → bin: load burn network, convert to inference format, save
+                let mpk_path = "nn_weights.mpk";
+                let bin_path = "nn_weights.bin";
+                let net: NNUEFeedForwardBurn<TrainBackend> = match load_network(mpk_path) {
+                    Ok(n) => {
+                        eprintln!("已加载 burn 权重 from {}", mpk_path);
+                        n
+                    }
+                    Err(e) => {
+                        eprintln!("加载 {} 失败: {}，无法转换", mpk_path, e);
+                        continue;
+                    }
+                };
+                // Convert burn weights to raw ndarray bytes
+                match burn_weights_to_ndarray_bytes(&net) {
+                    Ok(raw_bytes) => {
+                        // Deserialize into NNUEFeedForward (ndarray inference format)
+                        match NNUEFeedForward::from_bytes(&raw_bytes) {
+                            Ok(inference_net) => {
+                                match inference_net.save_to_file(bin_path) {
+                                    Ok(()) => eprintln!("已转换 {} → {} (zstd压缩)", mpk_path, bin_path),
+                                    Err(e) => eprintln!("保存 {} 失败: {}", bin_path, e),
+                                }
+                            }
+                            Err(e) => eprintln!("转换 burn→inference 格式失败: {}", e),
+                        }
+                    }
+                    Err(e) => eprintln!("转换 burn 权重失败: {}", e),
+                }
+            }
+            8 => {
+                // bin → mpk: load ndarray weights, convert to burn network, save
+                let bin_path = "nn_weights.bin";
+                let mpk_path = "nn_weights.mpk";
+                // Load ndarray bytes from bin file
+                let ndarray_bytes: Vec<u8> = match NNUEFeedForward::from_file_impl(bin_path) {
+                    Ok(net) => {
+                        eprintln!("已加载 inference 权重 from {}", bin_path);
+                        net.to_bytes().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+                    }
+                    Err(e) => {
+                        eprintln!("加载 {} 失败: {}，无法转换", bin_path, e);
+                        continue;
+                    }
+                };
+                // Use the helper to create burn network from ndarray bytes
+                let burn_net = match create_net_from_ndarray_bytes(&ndarray_bytes) {
+                    Ok(net) => net,
+                    Err(e) => {
+                        eprintln!("转换失败: {}", e);
+                        continue;
+                    }
+                };
+                if let Err(e) = save_network(&burn_net, mpk_path) {
+                    eprintln!("保存 {} 失败: {}", mpk_path, e);
+                } else {
+                    eprintln!("已转换 {} → {} (inference → burn)", bin_path, mpk_path);
+                }
+            }
             _ => {
                 println!("无效选择！");
             }
