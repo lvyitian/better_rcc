@@ -84,9 +84,9 @@ pub(crate) const PAWN_DIR: [i8; 2] = [-1, 1];
 
 /// Piece values for MVV-LVA scoring (Most Valuable Victim - Least Valuable Attacker)
 /// Indexed by PieceType: King, Advisor, Elephant, Pawn, Horse, Cannon, Chariot
-/// Ordering: Chariot > Horse ≥ Cannon > Advisor > Elephant ≥ Pawn
-/// Note: Horse (270) and Cannon (250) are close since both are conditional capturers
-const MVV_LVA_VALUES: [i32; 7] = [10000, 120, 80, 80, 270, 250, 500];
+/// Ordering: Chariot > Cannon ≥ Horse > Advisor > Elephant ≥ Pawn
+/// Note: Horse (250) and Cannon (270) are close since both are conditional capturers
+const MVV_LVA_VALUES: [i32; 7] = [10000, 120, 80, 80, 250, 270, 500];
 
 // =============================================================================
 // SEARCH CONSTANTS
