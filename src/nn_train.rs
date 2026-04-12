@@ -391,8 +391,8 @@ pub mod nn_train_impl {
     ///   - ft_weights: [INPUT_DIM][FT_DIM]  (each row = one feature's FT output over 1260 inputs)
     ///   - out_weights: [[i16; FT_DIM*2]; NUM_BUCKETS]  (each bucket row)
     /// The burn → ndarray conversion:
-    ///   - ft.weight: burn [512, 1260] → ndarray: transpose to [1260][512], then QA-quantize to i16
-    ///   - out.weight: burn [8, 1024]  → [8][1024] as f32, quantized to i16
+    ///   - ft.weight: burn [1024, 1260] → ndarray: transpose to [1260][1024], then QA-quantize to i16
+    ///   - out.weight: burn [8, 2048]  → [8][2048] as f32, quantized to i16
     ///
     /// The output format is identical to `NNUEFeedForward::to_bytes()`:
     ///   (ft_weights_flat: Vec<i16>, ft_bias: Vec<i16>, out_weights_flat: Vec<i16>, out_bias: Vec<i16>)
@@ -401,21 +401,21 @@ pub mod nn_train_impl {
     ) -> std::io::Result<Vec<u8>> {
         use crate::nnue_input::{FT_DIM, INPUT_DIM, NUM_BUCKETS, QA};
 
-        // ft.weight shape: [512, 1260] in burn
+        // ft.weight shape: [1024, 1260] in burn
         let ft_weight_data: Vec<f32> = net.ft.weight.to_data().as_slice::<f32>().unwrap().to_vec();
         let ft_bias_data: Vec<f32> = net.ft.bias.as_ref()
             .expect("ft bias should exist")
             .to_data()
             .as_slice::<f32>().unwrap().to_vec();
 
-        // out.weight shape: [8, 1024] in burn
+        // out.weight shape: [8, 2048] in burn
         let out_weight_data: Vec<f32> = net.out.weight.to_data().as_slice::<f32>().unwrap().to_vec();
         let out_bias_data: Vec<f32> = net.out.bias.as_ref()
             .expect("out bias should exist")
             .to_data()
             .as_slice::<f32>().unwrap().to_vec();
 
-        // ft.weight [512, 1260] → transpose to [1260, 512] = inference's ft_weights
+        // ft.weight [1024, 1260] → transpose to [1260, 1024] = inference's ft_weights
         // burn index = row * 1260 + col = i * 1260 + f → we want [f, i] in inference layout
         let mut ft_weights_flat = Vec::with_capacity(INPUT_DIM * FT_DIM);
         for f in 0..INPUT_DIM {

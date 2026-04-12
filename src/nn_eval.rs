@@ -172,12 +172,12 @@ impl InputPlanes {
 
 // =============================================================================
 // NNUE (Efficiently Updatable Neural Networks) Evaluation
-// Bullet-compliant (1260→512)×2→8 architecture
+// Bullet-compliant (1260→1024)×2→8 architecture
 // =============================================================================
 
 use crate::nnue_input::{INPUT_DIM, FT_DIM, NUM_BUCKETS, QA, QB, SCALE, bucket_index, NNInputPlanes};
 
-/// Feature transform output: 512 i16 values, cache-line aligned for SIMD.
+/// Feature transform output: 1024 i16 values, cache-line aligned for SIMD.
 #[repr(C, align(64))]
 #[derive(Clone)]
 pub struct Accumulator {
@@ -239,12 +239,12 @@ fn screlu(x: i16) -> i32 {
 #[allow(dead_code)]
 pub struct NNUEFeedForward {
     /// Feature transform weights: [INPUT_DIM][FT_DIM] stored as 1260 Accumulators (column-major).
-    /// Each column f has weights for feature f across all 512 hidden units.
+    /// Each column f has weights for feature f across all 1024 hidden units.
     pub ft_weights: Vec<Accumulator>,
     /// Feature transform bias: [FT_DIM], QA quantized.
     pub ft_bias: [i16; FT_DIM],
     /// Output layer weights: [NUM_BUCKETS][FT_DIM * 2] for bucketized output.
-    /// Each bucket has 1024 = 512 (stm) + 512 (ntm) inputs.
+    /// Each bucket has 2048 = 1024 (stm) + 1024 (ntm) inputs.
     pub out_weights: [[i16; FT_DIM * 2]; NUM_BUCKETS],
     /// Output layer bias: [NUM_BUCKETS], QA * QB quantized.
     pub out_bias: [i16; NUM_BUCKETS],
@@ -487,7 +487,7 @@ impl NNUEFeedForward {
         let (stm_acc, ntm_acc) = self.compute_accumulators(stm, ntm);
 
         // Apply SCReLU: clamp(0, QA)² → i32
-        // Then split and concatenate: [stm_acc(512), ntm_acc(512)] = 1024
+        // Then split and concatenate: [stm_acc(1024), ntm_acc(1024)] = 2048
         let mut combined = [0i32; FT_DIM * 2];
         for i in 0..FT_DIM {
             combined[i] = screlu(stm_acc.vals[i]);
@@ -546,9 +546,9 @@ impl Default for NNUEFeedForward {
 #[allow(dead_code)]
 #[derive(Module, Debug)]
 pub struct NNUEFeedForwardBurn<B: Backend = burn_ndarray::NdArray<f32>> {
-    /// Feature transform: 1260 → 512 linear layer
+    /// Feature transform: 1260 → 1024 linear layer
     pub ft: burn::nn::Linear<B>,
-    /// Output: 1024 → 8 bucket linear layer
+    /// Output: 2048 → 8 bucket linear layer
     pub out: burn::nn::Linear<B>,
 }
 
@@ -556,11 +556,11 @@ pub struct NNUEFeedForwardBurn<B: Backend = burn_ndarray::NdArray<f32>> {
 impl<B: Backend> NNUEFeedForwardBurn<B> {
     pub fn new() -> Self {
         let device = <B as Backend>::Device::default();
-        // Feature transform: 1260 → 512
+        // Feature transform: 1260 → 1024
         let ft = burn::nn::LinearConfig::new(INPUT_DIM, FT_DIM)
             .with_bias(true)
             .init(&device);
-        // Output: 1024 → 8 buckets
+        // Output: 2048 → 8 buckets
         let out = burn::nn::LinearConfig::new(FT_DIM * 2, NUM_BUCKETS)
             .with_bias(true)
             .init(&device);
@@ -584,7 +584,7 @@ impl<B: Backend> NNUEFeedForwardBurn<B> {
         let stm_2d = stm.clone().reshape([1, INPUT_DIM]);
         let ntm_2d = ntm.clone().reshape([1, INPUT_DIM]);
 
-        // FT: [1, 1260] → [1, 512]
+        // FT: [1, 1260] → [1, 1024]
         let ft_stm = self.ft.forward(stm_2d);
         let ft_ntm = self.ft.forward(ntm_2d);
 
@@ -594,30 +594,30 @@ impl<B: Backend> NNUEFeedForwardBurn<B> {
         let stm_act = clamped_stm.clone() * clamped_stm;
         let ntm_act = clamped_ntm.clone() * clamped_ntm;
 
-        // Concatenate: [1, 1024]
+        // Concatenate: [1, 2048]
         let combined = Tensor::cat(vec![stm_act, ntm_act], 1);
 
-        // Output: [1, 1024] → [1, 8]
+        // Output: [1, 2048] → [1, 8]
         self.out.forward(combined).reshape([8])
     }
 
     /// Batched forward pass: [batch, 1260] → [batch] bucket-selected scalar output.
     /// Applies FT → SCReLU → concat → output projection → gather bucket.
     fn forward_batched_impl(&self, stm: &Tensor<B, 2>, ntm: &Tensor<B, 2>, bucket_idx: usize) -> Tensor<B, 1> {
-        // FT: [batch, 1260] → [batch, 512]
+        // FT: [batch, 1260] → [batch, 1024]
         let ft_stm = self.ft.forward(stm.clone());
         let ft_ntm = self.ft.forward(ntm.clone());
 
-        // SCReLU: clamp(0, 255)² applied element-wise — shape unchanged [batch, 512]
+        // SCReLU: clamp(0, 255)² applied element-wise — shape unchanged [batch, 1024]
         let clamped_stm = ft_stm.clamp(0.0, 255.0);
         let clamped_ntm = ft_ntm.clamp(0.0, 255.0);
         let stm_act = clamped_stm.clone() * clamped_stm;
         let ntm_act = clamped_ntm.clone() * clamped_ntm;
 
-        // Concatenate along feature dim: [batch, 1024]
+        // Concatenate along feature dim: [batch, 2048]
         let combined = Tensor::cat(vec![stm_act, ntm_act], 1);
 
-        // Output projection: [batch, 1024] → [batch, 8]
+        // Output projection: [batch, 2048] → [batch, 8]
         let out = self.out.forward(combined);
 
         // Gather bucket column for each sample in batch: [batch]
@@ -642,20 +642,20 @@ impl<B: Backend> NNUEFeedForwardBurn<B> {
     /// Batched forward: return all 8 bucket outputs for each sample in the batch.
     /// [batch, 1260] × 2 → [batch, 8] raw bucket values (before tanh).
     pub fn forward_batched_all_buckets(&self, stm: &Tensor<B, 2>, ntm: &Tensor<B, 2>) -> Tensor<B, 2> {
-        // FT: [batch, 1260] → [batch, 512]
+        // FT: [batch, 1260] → [batch, 1024]
         let ft_stm = self.ft.forward(stm.clone());
         let ft_ntm = self.ft.forward(ntm.clone());
 
-        // SCReLU: clamp(0, 255)² applied element-wise — shape unchanged [batch, 512]
+        // SCReLU: clamp(0, 255)² applied element-wise — shape unchanged [batch, 1024]
         let clamped_stm = ft_stm.clamp(0.0, 255.0);
         let clamped_ntm = ft_ntm.clamp(0.0, 255.0);
         let stm_act = clamped_stm.clone() * clamped_stm;
         let ntm_act = clamped_ntm.clone() * clamped_ntm;
 
-        // Concatenate along feature dim: [batch, 1024]
+        // Concatenate along feature dim: [batch, 2048]
         let combined = Tensor::cat(vec![stm_act, ntm_act], 1);
 
-        // Output projection: [batch, 1024] → [batch, 8]
+        // Output projection: [batch, 2048] → [batch, 8]
         self.out.forward(combined)
     }
 }

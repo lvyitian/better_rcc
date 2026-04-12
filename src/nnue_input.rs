@@ -11,8 +11,8 @@ use crate::{Board, PieceType};
 
 /// Input dimension: 1260 = 2 × 630 = 2 × (7 × 90)
 pub const INPUT_DIM: usize = 1260;
-/// Feature transform dimension: 512 (hidden layer size of the NNUE linear transform)
-pub const FT_DIM: usize = 512;
+/// Feature transform dimension: 1024 (hidden layer size of the NNUE linear transform)
+pub const FT_DIM: usize = 1024;
 /// Number of buckets for the value head
 pub const NUM_BUCKETS: usize = 8;
 /// Quantization parameter A (scale numerator)
