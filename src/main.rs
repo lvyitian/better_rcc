@@ -316,16 +316,25 @@ impl Coord {
         }
     }
 
-    /// Core area for chariot support: x=3-5, and y is relative to color.
-    /// - Red: y=3-6 (stayed behind river, supporting role)
-    /// - Black: y=3-6 (mirrored, but conceptually Black's "home" side)
-    ///   A chariot in core area is positioned to support an attack or defend centrally.
+    /// Core area: x=3-5, y=3-6.
+    ///
+    /// The core area is the central band of the board that both sides contest.
+    /// Unlike most board regions, this one is symmetric — the same absolute
+    /// coordinates apply to both colors.
     #[inline(always)]
     pub fn in_core_area(self, color: Color) -> bool {
+        let _ = color; // Suppress unused warning for API symmetry
+        self.x >= CORE_X_MIN && self.x <= CORE_X_MAX
+            && self.y >= CORE_Y_MIN && self.y <= CORE_Y_MAX
+    }
+
+    /// Close to palace: x=3-5, y>=6 for Red, y<=3 for Black.
+    #[inline(always)]
+    pub fn close_to_palace(self, color: Color) -> bool {
         let x_ok = self.x >= CORE_X_MIN && self.x <= CORE_X_MAX;
         let y_ok = match color {
-            Color::Red => self.y >= CORE_Y_MIN && self.y <= CORE_Y_MAX,    // Red home side
-            Color::Black => self.y >= CORE_Y_MIN && self.y <= CORE_Y_MAX,  // Black home side (mirrored)
+            Color::Red => self.y >= CORE_Y_MAX,
+            Color::Black => self.y <= CORE_Y_MIN,
         };
         x_ok && y_ok
     }
@@ -7170,28 +7179,64 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // in_core_area Tests (with color parameter)
+    // in_core_area Tests (symmetric: same y range for both colors)
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_in_core_area_with_color() {
+    fn test_in_core_area_symmetric() {
         // Core area is x=3-5, y=3-6 for both colors (symmetric)
         let test_cases = vec![
             (3, 3, Color::Red, true),
             (4, 4, Color::Red, true),
             (5, 5, Color::Red, true),
             (3, 6, Color::Red, true),
+            (4, 6, Color::Red, true),
+            (5, 3, Color::Red, true),
             (2, 4, Color::Red, false),  // x out of range
-            (4, 7, Color::Red, false),  // y out of range
-            (4, 2, Color::Red, false),  // y out of range
+            (4, 7, Color::Red, false),  // y > 6
+            (4, 2, Color::Red, false),  // y < 3
             (3, 3, Color::Black, true),
             (4, 4, Color::Black, true),
             (5, 5, Color::Black, true),
+            (3, 6, Color::Black, true),
+            (4, 6, Color::Black, true),
+            (5, 3, Color::Black, true),
+            (2, 4, Color::Black, false), // x out of range
+            (4, 7, Color::Black, false), // y > 6
+            (4, 2, Color::Black, false), // y < 3
         ];
         for (x, y, color, expected) in test_cases {
             let coord = Coord::new(x, y);
             assert_eq!(coord.in_core_area(color), expected,
                 "Coord({}, {}) in_core_area({:?}) should be {}", x, y, color, expected);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // close_to_palace Tests (with color parameter)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_close_to_palace_with_color() {
+        // close_to_palace: x=3-5, and y >= 6 for Red, y <= 3 for Black
+        let test_cases = vec![
+            (3, 6, Color::Red, true),
+            (4, 7, Color::Red, true),
+            (5, 8, Color::Red, true),
+            (4, 5, Color::Red, false),  // y < 6
+            (4, 3, Color::Red, false),   // y < 6
+            (2, 7, Color::Red, false), // x out of range
+            (3, 3, Color::Black, true),
+            (4, 2, Color::Black, true),
+            (5, 0, Color::Black, true),
+            (4, 4, Color::Black, false), // y > 3
+            (4, 7, Color::Black, false), // y > 3
+            (6, 2, Color::Black, false), // x out of range
+        ];
+        for (x, y, color, expected) in test_cases {
+            let coord = Coord::new(x, y);
+            assert_eq!(coord.close_to_palace(color), expected,
+                "Coord({}, {}) close_to_palace({:?}) should be {}", x, y, color, expected);
         }
     }
 
