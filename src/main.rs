@@ -3586,10 +3586,20 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
                 let val_samples = &all_samples[split..];
                 eprintln!("训练集: {}, 验证集: {}", train_samples.len(), val_samples.len());
 
-                let mut net = NNUEFeedForwardBurn::<TrainBackend>::new();
+                let mpk_path = "nn_weights.mpk";
+                let mut net = match load_network(mpk_path) {
+                    Ok(n) => {
+                        eprintln!("已加载现有权重 from {}", mpk_path);
+                        n
+                    }
+                    Err(e) => {
+                        eprintln!("加载权重失败：{}，将从头开始训练", e);
+                        NNUEFeedForwardBurn::<TrainBackend>::new()
+                    }
+                };
                 train_supervised(&mut net, train_samples, val_samples, epochs, batch_size, lr);
 
-                let path = "nn_weights.mpk";
+                let path = mpk_path;
                 if let Err(e) = save_network(&net, path) {
                     eprintln!("保存权重失败: {}", e);
                 } else {
@@ -3624,10 +3634,20 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
                 let val_samples = &samples[split..];
                 eprintln!("训练集: {}, 验证集: {}", train_samples.len(), val_samples.len());
 
-                let mut net = NNUEFeedForwardBurn::<TrainBackend>::new();
+                let mpk_path = "nn_weights.mpk";
+                let mut net = match load_network(mpk_path) {
+                    Ok(n) => {
+                        eprintln!("已加载现有权重 from {}", mpk_path);
+                        n
+                    }
+                    Err(e) => {
+                        eprintln!("加载权重失败：{}，将从头开始训练", e);
+                        NNUEFeedForwardBurn::<TrainBackend>::new()
+                    }
+                };
                 train_supervised(&mut net, train_samples, val_samples, epochs, batch_size, lr);
 
-                let save_path = "nn_weights.mpk";
+                let save_path = mpk_path;
                 if let Err(e) = save_network(&net, save_path) {
                     eprintln!("保存权重失败: {}", e);
                 } else {
