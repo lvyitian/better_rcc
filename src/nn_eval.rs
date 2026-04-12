@@ -1,7 +1,7 @@
 // Neural network evaluation module
 // Converts board state to input planes for NN inference
 
-use crate::{Board, Color, PieceType};
+use crate::{Board, Color, PieceType, MATE_SCORE};
 #[allow(unused_imports)]
 use crate::RuleSet;
 use crate::eval::eval_impl::{handcrafted_evaluate, game_phase};
@@ -520,19 +520,14 @@ pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) 
     #[cfg(not(feature = "train"))]
     let output = NN_NET.forward_output(&_stm.data, &_ntm.data, _non_king_count);
 
-    // Normalize alpha + beta to sum to 1 (with minimum floor of 0.05)
-    let alpha = output.alpha.max(0.05);
-    let beta = output.beta.max(0.05);
-    let total = alpha + beta;
-    let alpha_norm = alpha / total;
-    let beta_norm = beta / total;
-
-    // NN outputs already scaled to centipawns
+    // Fixed 75% NN / 25% handcrafted blend.
+    // Both nn_score and handcrafted are normalized to [-400, 400] via tanh,
+    // then blended and offset by correction.
     let nn_score = output.nn_score;
-    // Correction is in [-400, 400] range, use as additive centipawn offset
+    let handcrafted_norm = (handcrafted as f32 / (MATE_SCORE as f32 / 4.0)).tanh() * 400.0;
     let correction = output.correction;
 
-    let blended = alpha_norm * nn_score + beta_norm * handcrafted as f32 + correction;
+    let blended = 0.75 * nn_score + 0.25 * handcrafted_norm + correction;
     blended as i32
 }
 
