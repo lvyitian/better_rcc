@@ -433,6 +433,7 @@ impl<B: Backend> NNUEFeedForwardBurn<B> {
 
     /// Batched forward: compute bucket-selected output for a batch of samples.
     /// [batch, 1260] × 2 → [batch] raw bucket values (before tanh).
+    #[allow(unused)]
     pub fn forward_batched_with_bucket(
         &self,
         stm: &Tensor<B, 2>,

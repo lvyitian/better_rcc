@@ -23,7 +23,7 @@ pub mod nn_train_impl {
         pub ntm_planes: Vec<f32>,
         /// Non-king piece count used to select bucket (0–30)
         pub non_king_count: u8,
-        /// Normalized label: clamp(score/400.0, -1.0, 1.0) for supervised,
+        /// Normalized label: clamp(score/2000.0, -1.0, 1.0) for supervised,
         /// or +1.0/0.0/-1.0 for game outcome
         pub label: f32,
         /// 0 = Red to move, 1 = Black to move
@@ -35,7 +35,7 @@ pub mod nn_train_impl {
         pub fn from_board(board: &Board, side_to_move: Color, score: i32) -> Self {
             use crate::nnue_input::{NNInputPlanes, count_non_king_pieces};
             let (stm, ntm) = NNInputPlanes::from_board(board);
-            let label = (score as f32 / 400.0).clamp(-1.0, 1.0);
+            let label = (score as f32 / 2000.0).clamp(-1.0, 1.0);
             let side_to_move = match side_to_move {
                 Color::Red => 0,
                 Color::Black => 1,
@@ -267,7 +267,6 @@ pub mod nn_train_impl {
                 let mut stm_flat = Vec::with_capacity(batch.len() * 1260);
                 let mut ntm_flat = Vec::with_capacity(batch.len() * 1260);
                 let mut targets = Vec::with_capacity(batch.len());
-                let bucket_idx = crate::nnue_input::bucket_index(batch.iter().map(|s| s.non_king_count).max().unwrap_or(0)) as i64;
                 for sample in batch {
                     stm_flat.extend_from_slice(&sample.stm_planes);
                     ntm_flat.extend_from_slice(&sample.ntm_planes);
@@ -280,8 +279,17 @@ pub mod nn_train_impl {
                     TensorData::new(ntm_flat, [batch.len(), 1260]), &device
                 );
 
-                // Forward pass: NNUEFeedForwardBurn → gather bucket-selected outputs → tanh * 400
-                let score_raw: Tensor<TrainBackend, 1> = net.forward_batched_with_bucket(&stm_tensor, &ntm_tensor, bucket_idx as usize);
+                // Forward pass: NNUEFeedForwardBurn → get all 8 bucket outputs per sample
+                let all_outputs: Tensor<TrainBackend, 2> = net.forward_batched_all_buckets(&stm_tensor, &ntm_tensor);
+
+                // Gather bucket-selected outputs using per-sample bucket indices
+                let bucket_indices: Vec<i64> = batch.iter()
+                    .map(|s| crate::nnue_input::bucket_index(s.non_king_count) as i64)
+                    .collect();
+                let bucket_idx_tensor: Tensor<TrainBackend, 1> = Tensor::from_data(
+                    TensorData::from(bucket_indices.as_slice()), &device
+                );
+                let score_raw: Tensor<TrainBackend, 1> = all_outputs.gather(1, bucket_idx_tensor.reshape([batch.len() as u32, 1]).int()).reshape([batch.len() as u32]);
 
                 // Scale to [-400, 400] via tanh, normalize to [-1, 1]
                 let nn_score = score_raw.tanh() * 400.0;
@@ -342,9 +350,9 @@ pub mod nn_train_impl {
             let bucket_tensor = net.forward_with_bucket(&stm_tensor, &ntm_tensor, bucket_idx);
             let score_raw: f32 = bucket_tensor.to_data().as_slice().expect("expected 1x1")[0];
             // Normalize to [-1, 1] to match label units (same as training)
-            let nn_score = score_raw.tanh();
-            let normalized = nn_score - sample.label;
-            let loss = normalized * normalized;
+            let nn_score = score_raw.tanh() * 400.0;
+            let normalized = nn_score / 400.0;
+            let loss = (normalized - sample.label) * (normalized - sample.label);
             total_loss += loss;
         }
         total_loss / val_data.len() as f32
