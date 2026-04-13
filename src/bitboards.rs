@@ -540,15 +540,20 @@ impl Bitboards {
 
     /// Pawn attacks from sq for the given color.
     /// Returns attack squares (forward + side if crossed river).
+    /// Filters out own-occupied destination squares.
     pub fn pawn_attacks(&self, sq: u8, color: Color) -> u128 {
         let x = (sq % 9) as i8;
         let y = (sq / 9) as i8;
         let dir: i8 = if color == Color::Red { -1 } else { 1 };
+        let occ_color = self.occupied(color);
         let mut attacks = 0u128;
 
         let forward_sq = (y + dir, x);
         if forward_sq.0 >= 0 && forward_sq.0 < 10 {
-            attacks |= 1_u128 << (forward_sq.0 * 9 + forward_sq.1) as u8;
+            let fsq = (forward_sq.0 * 9 + forward_sq.1) as u8;
+            if occ_color & (1_u128 << fsq) == 0 {
+                attacks |= 1_u128 << fsq;
+            }
         }
 
         // Side moves only after crossing river
@@ -557,7 +562,10 @@ impl Bitboards {
             for dx in [-1, 1] {
                 let sx = x + dx;
                 if (0..9).contains(&sx) {
-                    attacks |= 1_u128 << (y * 9 + sx) as u8;
+                    let ssq = (y * 9 + sx) as u8;
+                    if occ_color & (1_u128 << ssq) == 0 {
+                        attacks |= 1_u128 << ssq;
+                    }
                 }
             }
         }
