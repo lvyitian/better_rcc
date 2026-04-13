@@ -188,13 +188,15 @@ pub mod eval_impl {
 
     #[inline(always)]
     pub fn game_phase(board: &Board) -> i32 {
+        use crate::Bitboards;
         let mut phase = 0;
-        for y in 0..10 {
-            for x in 0..9 {
-                if let Some(p) = board.get(Coord::new(x as i8, y as i8)) {
-                    phase += PHASE_WEIGHTS[p.piece_type as usize];
-                }
+        let mut bb = board.bitboards.occupied_all();
+        while bb != 0 {
+            let sq = Bitboards::lsb_index(bb);
+            if let Some(p) = board.bitboards.piece_at(sq) {
+                phase += PHASE_WEIGHTS[p.piece_type as usize];
             }
+            bb &= bb - 1;
         }
         phase.clamp(0, TOTAL_PHASE)
     }
@@ -236,247 +238,53 @@ pub mod eval_impl {
 
     /// Simplified O(1) center control evaluation.
     ///
-    /// Counts weighted attacks on the core area (x=3-5, y=3-6) using direct
-    /// geometric checks instead of generate_*_moves().
+    /// Counts weighted attacks on the core area (x=3-5, y=3-6) using bitboard
+    /// attack methods and CORE_AREA_MASK.
     ///
     /// Weights: chariot/cannon=2, horse/pawn=1
     /// Net attacks are scaled by 5 and phase factor.
     fn center_control(board: &Board, color: Color, phase: i32) -> i32 {
+        use crate::Bitboards;
+        use crate::bitboards::CORE_AREA_MASK;
+
+        let bitboards = &board.bitboards;
         let mut our_attacks = 0;
         let mut their_attacks = 0;
 
-        // Core area bounds
-        let core_x_min = CORE_X_MIN;
-        let core_x_max = CORE_X_MAX;
-        let core_y_min = CORE_Y_MIN;
-        let core_y_max = CORE_Y_MAX;
+        // Iterate over all pieces via bitboards
+        let mut occ = bitboards.occupied_all();
+        while occ != 0 {
+            let sq = Bitboards::lsb_index(occ);
+            if let Some(piece) = bitboards.piece_at(sq) {
+                let weight = match piece.piece_type {
+                    PieceType::Chariot | PieceType::Cannon => 2,
+                    PieceType::Horse | PieceType::Pawn => 1,
+                    _ => 0,
+                };
 
-        // Iterate over all pieces on board (max 32 total, bounded)
-        for y in 0..10 {
-            for x in 0..9 {
-                if let Some(piece) = board.get(Coord::new(x as i8, y as i8)) {
-                    let pos = Coord::new(x as i8, y as i8);
-                    let weight = match piece.piece_type {
-                        PieceType::Chariot | PieceType::Cannon => 2,
-                        PieceType::Horse | PieceType::Pawn => 1,
+                if weight > 0 {
+                    let attacks = match piece.piece_type {
+                        PieceType::Chariot => bitboards.chariot_attacks(sq, piece.color),
+                        PieceType::Cannon => bitboards.cannon_attacks(sq, piece.color),
+                        PieceType::Horse => bitboards.horse_attacks(sq, piece.color),
+                        PieceType::Pawn => bitboards.pawn_attacks(sq, piece.color),
                         _ => 0,
                     };
-
-                    if weight == 0 {
-                        continue;
-                    }
-
-                    // Count attacks on core area for this piece
-                    let attack_count = match piece.piece_type {
-                        PieceType::Chariot | PieceType::Cannon => {
-                            let mut count = 0;
-
-                            // Horizontal attacks: if piece shares a row with core (y in [core_y_min, core_y_max])
-                            // AND can reach core in that direction (ray passes through core before edge)
-                            if pos.y >= core_y_min && pos.y <= core_y_max {
-                                // Left: pass through core if piece is right of core left edge
-                                if pos.x > core_x_min {
-                                    count += count_dir_attacks(board, pos, piece, -1, 0, core_x_min, core_x_max, core_y_min, core_y_max);
-                                }
-                                // Right: pass through core if piece is left of core right edge
-                                if pos.x < core_x_max {
-                                    count += count_dir_attacks(board, pos, piece, 1, 0, core_x_min, core_x_max, core_y_min, core_y_max);
-                                }
-                            }
-
-                            // Vertical attacks: if piece shares a column with core (x in [core_x_min, core_x_max])
-                            // AND can reach core in that direction
-                            if pos.x >= core_x_min && pos.x <= core_x_max {
-                                // Down: pass through core if piece is above core bottom edge
-                                if pos.y > core_y_min {
-                                    count += count_dir_attacks(board, pos, piece, 0, 1, core_x_min, core_x_max, core_y_min, core_y_max);
-                                }
-                                // Up: pass through core if piece is below core top edge
-                                if pos.y < core_y_max {
-                                    count += count_dir_attacks(board, pos, piece, 0, -1, core_x_min, core_x_max, core_y_min, core_y_max);
-                                }
-                            }
-
-                            count
-                        },
-                        PieceType::Horse => {
-                            // Horse attack offsets: (horse_head_dx, horse_head_dy, target_dx, target_dy)
-                            // Horse head is offset from attacker, target is offset from horse head
-                            let horse_offsets: [(i8, i8, i8, i8); 8] = [
-                                (-2, -1, -1, 0), (-2, 1, -1, 0),  // left-up, left-down
-                                (2, -1, 1, 0), (2, 1, 1, 0),      // right-up, right-down
-                                (-1, -2, 0, -1), (1, -2, 0, -1), // down-left, down-right
-                                (-1, 2, 0, 1), (1, 2, 0, 1),    // up-left, up-right
-                            ];
-
-                            let mut count = 0;
-                            for (hh_dx, hh_dy, t_dx, t_dy) in horse_offsets {
-                                let head_x = pos.x + hh_dx;
-                                let head_y = pos.y + hh_dy;
-                                let target_x = pos.x + t_dx;
-                                let target_y = pos.y + t_dy;
-
-                                let head = Coord::new(head_x, head_y);
-                                if !head.is_valid() || board.get(head).is_some() {
-                                    continue; // Horse head must be empty
-                                }
-
-                                if target_x >= core_x_min && target_x <= core_x_max
-                                    && target_y >= core_y_min && target_y <= core_y_max
-                                {
-                                    count += 1;
-                                }
-                            }
-                            count
-                        },
-                        PieceType::Pawn => {
-                            let crossed = match piece.color {
-                                Color::Red => pos.y <= 4,   // Red has crossed river
-                                Color::Black => pos.y >= 5,  // Black has crossed river
-                            };
-
-                            let forward_dir = match piece.color {
-                                Color::Red => -1,  // Red moves toward y=0
-                                Color::Black => 1,  // Black moves toward y=9
-                            };
-
-                            let forward_y = pos.y + forward_dir;
-                            let forward_in_core = pos.x >= core_x_min && pos.x <= core_x_max
-                                && forward_y >= core_y_min && forward_y <= core_y_max;
-
-                            let mut count = 0;
-                            if forward_in_core {
-                                count += 1;
-                            }
-                            if crossed {
-                                // Side attacks after crossing river
-                                let left_x = pos.x - 1;
-                                let right_x = pos.x + 1;
-                                if left_x >= core_x_min && left_x <= core_x_max
-                                    && forward_y >= core_y_min && forward_y <= core_y_max
-                                {
-                                    count += 1;
-                                }
-                                if right_x >= core_x_min && right_x <= core_x_max
-                                    && forward_y >= core_y_min && forward_y <= core_y_max
-                                {
-                                    count += 1;
-                                }
-                            }
-                            count
-                        },
-                        _ => 0,
-                    };
-
-                    if attack_count > 0 {
+                    let core_attacks = (attacks & CORE_AREA_MASK).count_ones() as i32;
+                    if core_attacks > 0 {
                         if piece.color == color {
-                            our_attacks += attack_count * weight;
+                            our_attacks += core_attacks * weight;
                         } else {
-                            their_attacks += attack_count * weight;
+                            their_attacks += core_attacks * weight;
                         }
                     }
                 }
             }
+            occ &= occ - 1;
         }
 
         let net_attacks = (our_attacks - their_attacks) * color.sign();
         net_attacks * 5 * (30 + 70 * phase) / 100
-    }
-
-    /// Count attacks from a chariot or cannon in a specific direction toward core area.
-    /// Returns 1 if the piece can attack the core area in this direction, 0 otherwise.
-    /// For chariot: attacks if path to core is clear (no pieces before target).
-    /// For cannon: attacks if exactly 1 screen before empty target, or 0 screens before enemy target.
-    #[allow(clippy::too_many_arguments)]
-    fn count_dir_attacks(
-        board: &Board,
-        pos: Coord,
-        piece: Piece,
-        dx: i8,
-        dy: i8,
-        core_x_min: i8,
-        core_x_max: i8,
-        core_y_min: i8,
-        core_y_max: i8,
-    ) -> i32 {
-        let (start, end, is_vertical) = if dx != 0 {
-            // Horizontal: scan x from pos.x+dx toward edge
-            if dx > 0 { (pos.x + 1, 9, false) } else { (0, pos.x - 1, false) }
-        } else {
-            // Vertical: scan y from pos.y+dy toward edge
-            if dy > 0 { (pos.y + 1, 10, true) } else { (0, pos.y - 1, true) }
-        };
-
-        let mut screen_count = 0;
-        let mut found_target = false;
-
-        let iterate: Box<dyn Iterator<Item = i8>> = if is_vertical {
-            if dy > 0 {
-                Box::new(start..end)
-            } else {
-                Box::new((end..start).rev())
-            }
-        } else {
-            if dx > 0 {
-                Box::new(start..end)
-            } else {
-                Box::new((end..start).rev())
-            }
-        };
-
-        for i in iterate {
-            let cx = if is_vertical { pos.x } else { i };
-            let cy = if is_vertical { i } else { pos.y };
-            let c = Coord::new(cx, cy);
-
-            // Is this square in the core area?
-            let in_core = if is_vertical {
-                cy >= core_y_min && cy <= core_y_max
-            } else {
-                cx >= core_x_min && cx <= core_x_max
-            };
-
-            if in_core && !found_target {
-                // First core square - this is our target
-                found_target = true;
-                match board.get(c) {
-                    Some(p) => {
-                        // Both chariot and cannon can capture enemy directly
-                        if p.color != piece.color {
-                            return 1;
-                        }
-                        // Friendly piece blocks the attack
-                        return 0;
-                    },
-                    None => {
-                        // Empty core square - continue scanning for more core squares
-                    }
-                }
-            } else if found_target {
-                // We've already passed the target - count any piece as a screen
-                if board.get(c).is_some() {
-                    screen_count += 1;
-                }
-            } else {
-                // Before reaching target - count as screen
-                if board.get(c).is_some() {
-                    screen_count += 1;
-                }
-            }
-        }
-
-        if !found_target {
-            return 0;
-        }
-
-        // At target: empty square, need to check screen count
-        // Chariot: clear path (screen_count == 0) attacks empty
-        // Cannon: exactly 1 screen attacks empty
-        match piece.piece_type {
-            PieceType::Chariot if screen_count == 0 => 1,
-            PieceType::Cannon if screen_count == 1 => 1,
-            _ => 0,
-        }
     }
 
 /// Evaluate attack rewards: hanging pieces, overload, central attacks, king attacks
@@ -494,17 +302,30 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
     }
     let mut our_pieces: SmallVec::<[PieceInfo; 16]> = SmallVec::new();
     let mut enemy_pieces: SmallVec::<[PieceInfo; 16]> = SmallVec::new();
-    for y in 0..10 {
-        for x in 0..9 {
-            let pos = Coord::new(x as i8, y as i8);
-            if let Some(p) = board.get(pos) {
-                if p.color == color {
-                    our_pieces.push(PieceInfo { pos, pt: p.piece_type });
-                } else {
-                    enemy_pieces.push(PieceInfo { pos, pt: p.piece_type });
-                }
-            }
+    use crate::Bitboards;
+    let bitboards = &board.bitboards;
+
+    let mut occ = bitboards.occupied(color);
+    while occ != 0 {
+        let sq = Bitboards::lsb_index(occ);
+        if let Some(p) = bitboards.piece_at(sq) {
+            let x = sq % 9;
+            let y = sq / 9;
+            our_pieces.push(PieceInfo { pos: Coord::new(x as i8, y as i8), pt: p.piece_type });
         }
+        occ &= occ - 1;
+    }
+
+    let opp = color.opponent();
+    let mut occ_enemy = bitboards.occupied(opp);
+    while occ_enemy != 0 {
+        let sq = Bitboards::lsb_index(occ_enemy);
+        if let Some(p) = bitboards.piece_at(sq) {
+            let x = sq % 9;
+            let y = sq / 9;
+            enemy_pieces.push(PieceInfo { pos: Coord::new(x as i8, y as i8), pt: p.piece_type });
+        }
+        occ_enemy &= occ_enemy - 1;
     }
 
     // For each enemy piece, count how many attacks and defenses it has
@@ -665,23 +486,26 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
 }
 
     fn piece_coordination(board: &Board, color: Color, phase: i32) -> i32 {
+        use crate::Bitboards;
         let mut coordination = 0;
         let (_rk, _bk) = board.find_kings();
         let enemy_king = match color {
             Color::Red => _bk,
             Color::Black => _rk,
         };
+        let bitboards = &board.bitboards;
 
-        // Collect our pieces - maximum 16 pieces per side
+        // Collect our pieces via bitboards
         let mut our_pieces = SmallVec::<[(Piece, Coord); 16]>::new();
-        for y in 0..10 {
-            for x in 0..9 {
-                let pos = Coord::new(x as i8, y as i8);
-                if let Some(piece) = board.get(pos)
-                    && piece.color == color {
-                        our_pieces.push((piece, pos));
-                    }
+        let mut occ = bitboards.occupied(color);
+        while occ != 0 {
+            let sq = Bitboards::lsb_index(occ);
+            if let Some(piece) = bitboards.piece_at(sq) {
+                let x = sq % 9;
+                let y = sq / 9;
+                our_pieces.push((piece, Coord::new(x as i8, y as i8)));
             }
+            occ &= occ - 1;
         }
 
         let mut has_horse = false;
@@ -788,6 +612,7 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
     }
 
     fn king_safety(board: &Board, color: Color, phase: i32) -> Option<i32> {
+        use crate::Bitboards;
         let (rk, bk) = board.find_kings();
         let king_pos = match color {
             Color::Red => rk?,
@@ -795,6 +620,7 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
         };
         let opponent = color.opponent();
         let mut safety = 0;
+        let bitboards = &board.bitboards;
 
         for (dx, dy) in PALACE_DELTAS {
             let pos = Coord::new(king_pos.x + dx, king_pos.y + dy);
@@ -810,22 +636,24 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
         }
 
         let mg_factor = phase;
-        for y in 0..10 {
-            for x in 0..9 {
+        let mut occ_opp = bitboards.occupied(opponent);
+        while occ_opp != 0 {
+            let sq = Bitboards::lsb_index(occ_opp);
+            if let Some(p) = bitboards.piece_at(sq) {
+                let x = sq % 9;
+                let y = sq / 9;
                 let pos = Coord::new(x as i8, y as i8);
-                if let Some(p) = board.get(pos)
-                    && p.color == opponent {
-                        let dist = (pos.x - king_pos.x).abs() + (pos.y - king_pos.y).abs();
-                        let threat = match p.piece_type {
-                            PieceType::Chariot => (14 - dist).max(0) as i32 * 10,
-                            PieceType::Cannon => (12 - dist).max(0) as i32 * 7,
-                            PieceType::Horse => (10 - dist).max(0) as i32 * 8,
-                            PieceType::Pawn if dist <= 4 => (5 - dist) as i32 * 8,
-                            _ => 0,
-                        };
-                        safety -= threat * mg_factor / TOTAL_PHASE;
-                    }
+                let dist = (pos.x - king_pos.x).abs() + (pos.y - king_pos.y).abs();
+                let threat = match p.piece_type {
+                    PieceType::Chariot => (14 - dist).max(0) as i32 * 10,
+                    PieceType::Cannon => (12 - dist).max(0) as i32 * 7,
+                    PieceType::Horse => (10 - dist).max(0) as i32 * 8,
+                    PieceType::Pawn if dist <= 4 => (5 - dist) as i32 * 8,
+                    _ => 0,
+                };
+                safety -= threat * mg_factor / TOTAL_PHASE;
             }
+            occ_opp &= occ_opp - 1;
         }
 
         // 2. Attack pressure near enemy king — our pieces near their king
@@ -835,22 +663,25 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
         };
 
         if let Some(ek) = enemy_king_pos {
-            for y in 0..10 {
-                for x in 0..9 {
+            let mut occ_our = bitboards.occupied(color);
+            while occ_our != 0 {
+                let sq = Bitboards::lsb_index(occ_our);
+                if let Some(p) = bitboards.piece_at(sq) {
+                    let x = sq % 9;
+                    let y = sq / 9;
                     let our_pos = Coord::new(x as i8, y as i8);
-                    if let Some(p) = board.get(our_pos) && p.color == color {
-                        let dist = our_pos.distance_to(ek);
-                        if dist <= 2 {
-                            let pressure = match p.piece_type {
-                                PieceType::Chariot | PieceType::Cannon => 15,
-                                PieceType::Horse => 10,
-                                PieceType::Pawn if our_pos.crosses_river(color) => 5,
-                                _ => 0,
-                            };
-                            safety += pressure;
-                        }
+                    let dist = our_pos.distance_to(ek);
+                    if dist <= 2 {
+                        let pressure = match p.piece_type {
+                            PieceType::Chariot | PieceType::Cannon => 15,
+                            PieceType::Horse => 10,
+                            PieceType::Pawn if our_pos.crosses_river(color) => 5,
+                            _ => 0,
+                        };
+                        safety += pressure;
                     }
                 }
+                occ_our &= occ_our - 1;
             }
         }
 
@@ -879,110 +710,131 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
     }
 
     fn pawn_structure(board: &Board, color: Color, phase: i32) -> i32 {
+        use crate::Bitboards;
         let mut score = 0;
         let eg_factor = TOTAL_PHASE - phase;
+        let bitboards = &board.bitboards;
 
         // Count pawns per file for doubled pawn detection
         let mut pawns_per_file = [0i32; 9];
 
-        for y in 0..10 {
-            for (x, file_count) in pawns_per_file.iter_mut().enumerate() {
-                let pos = Coord::new(x as i8, y as i8);
-                if let Some(p) = board.get(pos)
-                    && p.color == color && p.piece_type == PieceType::Pawn {
-                        *file_count += 1;
+        let mut occ = bitboards.occupied(color);
+        while occ != 0 {
+            let sq = Bitboards::lsb_index(occ);
+            if let Some(p) = bitboards.piece_at(sq) {
+                if p.piece_type == PieceType::Pawn {
+                    let x = sq % 9;
+                    let y = sq / 9;
+                    pawns_per_file[x as usize] += 1;
 
-                        // Doubled pawn penalty: -30 per pawn on a file with 2+ pawns
-                        // Only penalize once per file (the second pawn and beyond)
-                        if *file_count >= 2 {
-                            score -= 30;
-                        }
+                    let file_count = pawns_per_file[x as usize];
+                    // Doubled pawn penalty: -30 per pawn on a file with 2+ pawns
+                    if file_count >= 2 {
+                        score -= 30;
+                    }
 
-                        // Back-rank pawn penalty: -20 (not crossed river)
-                        // Red: y=6 (starting row is 7, not crossed if y > 4)
-                        // Black: y=3 (starting row is 2, not crossed if y < 5)
-                        let not_crossed = match color {
-                            Color::Red => y == 6,    // Red's back rank before river
-                            Color::Black => y == 3,  // Black's back rank before river
-                        };
-                        if not_crossed {
-                            score -= 20;
-                        }
+                    // Back-rank pawn penalty: -20 (not crossed river)
+                    let not_crossed = match color {
+                        Color::Red => y == 6,
+                        Color::Black => y == 3,
+                    };
+                    if not_crossed {
+                        score -= 20;
+                    }
 
-                        let left = Coord::new(pos.x - 1, pos.y);
-                        let right = Coord::new(pos.x + 1, pos.y);
-                        let mut linked = 0;
-                        if let Some(lp) = board.get(left)
-                            && lp.color == color && lp.piece_type == PieceType::Pawn {
+                    // Pawn linkage: check left and right neighbors on same rank
+                    let left_sq = sq - 1;
+                    let right_sq = sq + 1;
+                    let mut linked = 0;
+                    if left_sq / 9 == y {
+                        if let Some(lp) = bitboards.piece_at(left_sq) {
+                            if lp.piece_type == PieceType::Pawn && lp.color == color {
                                 linked += 1;
-                            }
-                        if let Some(rp) = board.get(right)
-                            && rp.color == color && rp.piece_type == PieceType::Pawn {
-                                linked += 1;
-                            }
-                        score += linked * (20 * TOTAL_PHASE / 82 + 30 * eg_factor / 82);
-
-                        if eg_factor > TOTAL_PHASE / 2 && pos.crosses_river(color) {
-                            let (rk, bk) = board.find_kings();
-                            let enemy_king = if color == Color::Red { bk } else { rk };
-                            if let Some(ek) = enemy_king {
-                                let dist = (pos.x - ek.x).abs() + (pos.y - ek.y).abs();
-                                if dist <= 2 {
-                                    score += (3 - dist) as i32 * 50;
-                                }
-                            }
-                        }
-
-                        // Advancement bonus: reward pushing pawns forward
-                        let crossed = pos.crosses_river(color);
-                        let advancement_bonus = if crossed {
-                            // Crossed river — check for back rank threat or further progress
-                            match color {
-                                Color::Red => {
-                                    if pos.y == 0 { 80 }  // Red pawn on Black's back rank (threat to promote)
-                                    else if pos.y <= 3 { 5 }  // Crossed but not further advanced
-                                    else { 0 }
-                                },
-                                Color::Black => {
-                                    if pos.y == 9 { 80 }  // Black pawn on Red's back rank
-                                    else if pos.y >= 6 { 5 }  // Crossed but not further advanced
-                                    else { 0 }
-                                }
-                            }
-                        } else {
-                            0
-                        };
-                        score += advancement_bonus;
-
-                        // Central file bonus: pawn on file 4 or 5 (columns 4-5) gets bonus per rank advanced
-                        if pos.x == 4 || pos.x == 5 {
-                            let ranks_from_origin: i32 = match color {
-                                Color::Red => (6 - pos.y) as i32,  // Red starts at y=6, higher = more advanced
-                                Color::Black => (pos.y - 3) as i32,  // Black starts at y=3
-                            };
-                            if ranks_from_origin > 0 {
-                                score += ranks_from_origin * 10;
                             }
                         }
                     }
+                    if right_sq / 9 == y {
+                        if let Some(rp) = bitboards.piece_at(right_sq) {
+                            if rp.piece_type == PieceType::Pawn && rp.color == color {
+                                linked += 1;
+                            }
+                        }
+                    }
+                    score += linked * (20 * TOTAL_PHASE / 82 + 30 * eg_factor / 82);
+
+                    // Passed pawn bonus in endgame
+                    let y_i8 = y as i8;
+                    let crossed = match color {
+                        Color::Red => y_i8 <= 4,
+                        Color::Black => y_i8 >= 5,
+                    };
+                    if eg_factor > TOTAL_PHASE / 2 && crossed {
+                        let (rk, bk) = board.find_kings();
+                        let enemy_king = if color == Color::Red { bk } else { rk };
+                        if let Some(ek) = enemy_king {
+                            let dist = ((x as i8) - ek.x).abs() + ((y as i8) - ek.y).abs();
+                            if dist <= 2 {
+                                score += (3 - dist) as i32 * 50;
+                            }
+                        }
+                    }
+
+                    // Advancement bonus
+                    let crossed = match color {
+                        Color::Red => y_i8 <= 4,
+                        Color::Black => y_i8 >= 5,
+                    };
+                    if crossed {
+                        score += match color {
+                            Color::Red => {
+                                if y == 0 { 80 }
+                                else if y <= 3 { 5 }
+                                else { 0 }
+                            },
+                            Color::Black => {
+                                if y == 9 { 80 }
+                                else if y >= 6 { 5 }
+                                else { 0 }
+                            }
+                        };
+                    }
+
+                    // Central file bonus: pawn on file 4 or 5 gets bonus per rank advanced
+                    if x == 4 || x == 5 {
+                        let ranks_from_origin: i32 = match color {
+                            Color::Red => (6 - y as i8) as i32,
+                            Color::Black => (y as i8 - 3) as i32,
+                        };
+                        if ranks_from_origin > 0 {
+                            score += ranks_from_origin * 10;
+                        }
+                    }
+                }
             }
+            occ &= occ - 1;
         }
         score * color.sign()
     }
 
     fn elephant_structure(board: &Board, color: Color, phase: i32) -> i32 {
+        use crate::Bitboards;
         let mut score = 0;
+        let bitboards = &board.bitboards;
+
         // At most 2 elephants per side
         let mut elephants = SmallVec::<[Coord; 2]>::new();
 
-        for y in 0..10 {
-            for x in 0..9 {
-                let pos = Coord::new(x as i8, y as i8);
-                if let Some(p) = board.get(pos)
-                    && p.color == color && p.piece_type == PieceType::Elephant {
-                        elephants.push(pos);
-                    }
+        let mut occ = bitboards.occupied(color);
+        while occ != 0 {
+            let sq = Bitboards::lsb_index(occ);
+            if let Some(p) = bitboards.piece_at(sq) {
+                if p.piece_type == PieceType::Elephant {
+                    let x = sq % 9;
+                    let y = sq / 9;
+                    elephants.push(Coord::new(x as i8, y as i8));
+                }
             }
+            occ &= occ - 1;
         }
 
         let count = elephants.len();
@@ -1070,57 +922,58 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
         let phase = game_phase(board);
         let mut score = 0;
 
-        for y in 0..10 {
-            for x in 0..9 {
-                if let Some(piece) = board.get(Coord::new(x as i8, y as i8)) {
-                    let x_usize = x;
-                    let y_usize = y;
-                    let sign = piece.color.sign();
-                    let pos = Coord::new(x as i8, y as i8);
+        use crate::Bitboards;
+        let bitboards = &board.bitboards;
+        let mut occ = bitboards.occupied_all();
+        while occ != 0 {
+            let sq = Bitboards::lsb_index(occ);
+            if let Some(piece) = bitboards.piece_at(sq) {
+                let x = sq % 9;
+                let y = sq / 9;
+                let x_usize = x as usize;
+                let y_usize = y as usize;
+                let sign = piece.color.sign();
+                let pos = Coord::new(x as i8, y as i8);
 
-                    let mg_v = MG_VALUE[piece.piece_type as usize];
-                    let eg_v = EG_VALUE[piece.piece_type as usize];
-                    let val = (mg_v * phase + eg_v * (TOTAL_PHASE - phase)) / TOTAL_PHASE;
-                    score += val * sign;
+                let mg_v = MG_VALUE[piece.piece_type as usize];
+                let eg_v = EG_VALUE[piece.piece_type as usize];
+                let val = (mg_v * phase + eg_v * (TOTAL_PHASE - phase)) / TOTAL_PHASE;
+                score += val * sign;
 
-                    let pst = pst_val(piece.piece_type, piece.color, x_usize, y_usize, phase);
-                    score += pst;
+                let pst = pst_val(piece.piece_type, piece.color, x_usize, y_usize, phase);
+                score += pst;
 
-                    match piece.piece_type {
-                        PieceType::Horse => {
-                            let mob = horse_mobility(board, pos, piece.color);
-                            score += mob * sign;
-                            // Activity bonus: horse on 4th/5th rank from its starting side
-                            // (Red: y=5-6 is near home; Black: y=3-4 is near home)
-                            // Rewards development without being too generous
-                            let near_home = match piece.color {
-                                Color::Red => pos.y >= 5 && pos.y <= 6,
-                                Color::Black => pos.y >= 3 && pos.y <= 4,
-                            };
-                            if near_home {
-                                score += 15 * sign;
-                            }
+                match piece.piece_type {
+                    PieceType::Horse => {
+                        let mob = horse_mobility(board, pos, piece.color);
+                        score += mob * sign;
+                        let near_home = match piece.color {
+                            Color::Red => pos.y >= 5 && pos.y <= 6,
+                            Color::Black => pos.y >= 3 && pos.y <= 4,
+                        };
+                        if near_home {
+                            score += 15 * sign;
                         }
-                        PieceType::Chariot => {
-                            let mob = chariot_mobility(board, pos, piece.color);
-                            score += mob * sign;
-                            // Activity bonus: on enemy back two rows
-                            let on_enemy_back_rank = match piece.color {
-                                Color::Red => pos.y <= 1,    // Red attacking Black's back rank (y=8,9)
-                                Color::Black => pos.y >= 8,  // Black attacking Red's back rank (y=0,1)
-                            };
-                            if on_enemy_back_rank {
-                                score += 40 * sign;
-                            }
-                        }
-                        PieceType::Cannon => {
-                            let sup = cannon_support(board, pos, piece.color);
-                            score += sup * sign;
-                        }
-                        _ => {}
                     }
+                    PieceType::Chariot => {
+                        let mob = chariot_mobility(board, pos, piece.color);
+                        score += mob * sign;
+                        let on_enemy_back_rank = match piece.color {
+                            Color::Red => pos.y <= 1,
+                            Color::Black => pos.y >= 8,
+                        };
+                        if on_enemy_back_rank {
+                            score += 40 * sign;
+                        }
+                    }
+                    PieceType::Cannon => {
+                        let sup = cannon_support(board, pos, piece.color);
+                        score += sup * sign;
+                    }
+                    _ => {}
                 }
             }
+            occ &= occ - 1;
         }
 
         if let Some(ks_red) = king_safety(board, Color::Red, phase) {
@@ -1137,21 +990,19 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
                 // Count how many pieces of the OTHER color (the attacker) can attack this king
                 let attacker_color = king_color.opponent();
                 let mut attack_count = 0;
-                for y in 0..10 {
-                    for x in 0..9 {
+                let mut occ_att = bitboards.occupied(attacker_color);
+                while occ_att != 0 {
+                    let sq = Bitboards::lsb_index(occ_att);
+                    if let Some(_p) = bitboards.piece_at(sq) {
+                        let x = sq % 9;
+                        let y = sq / 9;
                         let pos = Coord::new(x as i8, y as i8);
-                        if let Some(p) = board.get(pos) && p.color == attacker_color {
-                            // A piece attacks kp if... let's check if kp is reachable
-                            // Actually let's use generate_pseudo_moves to check attacks
-                            // Simpler: count pieces on the 8 adjacent squares
-                            // Even simpler: if the king is in check, that's already checked
-                            // For now, let's just check if any attacker can reach adjacent squares
-                            let dist = pos.distance_to(kp);
-                            if dist == 1 {
-                                attack_count += 1;
-                            }
+                        let dist = pos.distance_to(kp);
+                        if dist == 1 {
+                            attack_count += 1;
                         }
                     }
+                    occ_att &= occ_att - 1;
                 }
                 let bonus = attack_count * 25 * king_color.sign();
                 score += bonus;
