@@ -5,6 +5,8 @@ use crate::{Board, Color, Coord, PieceType, MATE_SCORE};
 #[allow(unused_imports)]
 use crate::RuleSet;
 use crate::eval::eval_impl::{handcrafted_evaluate, game_phase};
+#[allow(unused_imports)]
+use crate::nnue_state::{nnue_cache_get, nnue_cache_insert};
 #[cfg(feature = "train")]
 use burn::prelude::*;
 #[cfg(feature = "train")]
@@ -707,19 +709,33 @@ pub static NN_NET: std::sync::LazyLock<NNUEFeedForward> =
 pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) -> i32 {
     let handcrafted = handcrafted_evaluate(board, side, initiative);
 
-    // Encode board into NNUE dual-perspective input planes
-    let (_stm, _ntm) = NNInputPlanes::from_board(board);
-    let _non_king_count = crate::nnue_input::count_non_king_pieces(board);
+    // Compute NN output based on side and dirty flag
+    let output = if !board.nnue_state.dirty {
+        // Clean: use stored accumulators directly
+        let stm_acc = if side == Color::Red { &board.nnue_state.red_acc } else { &board.nnue_state.black_acc };
+        let ntm_acc = if side == Color::Red { &board.nnue_state.black_acc } else { &board.nnue_state.red_acc };
+        let non_king_count = board.nnue_state.non_king_count;
+        NN_NET.forward_output_from_accumulators(stm_acc, ntm_acc, non_king_count)
+    } else {
+        // Dirty: try cache first
+        if let Some((ra, ba, nc)) = nnue_cache_get(board.zobrist_key) {
+            let stm_acc = if side == Color::Red { &ra } else { &ba };
+            let ntm_acc = if side == Color::Red { &ba } else { &ra };
+            NN_NET.forward_output_from_accumulators(stm_acc, ntm_acc, nc)
+        } else {
+            // Recompute from scratch
+            let (stm, ntm) = crate::nnue_input::NNInputPlanes::from_board(board);
+            let (ra, ba) = NN_NET.compute_accumulators(&stm.data, &ntm.data);
+            let nc = crate::nnue_input::count_non_king_pieces(board);
+            let stm_acc = if side == Color::Red { &ra } else { &ba };
+            let ntm_acc = if side == Color::Red { &ba } else { &ra };
+            NN_NET.forward_output_from_accumulators(stm_acc, ntm_acc, nc)
+        }
+    };
 
-    let output = NN_NET.forward_output(&_stm.data, &_ntm.data, _non_king_count);
-
-    // Fixed 75% NN / 25% handcrafted blend.
-    // Both nn_score and handcrafted are normalized to [-400, 400] via tanh,
-    // then blended and offset by correction.
     let nn_score = output.nn_score;
     let handcrafted_norm = (handcrafted as f32 / (MATE_SCORE as f32 / 4.0)).tanh() * 400.0;
     let correction = output.correction;
-
     let blended = 0.75 * nn_score + 0.25 * handcrafted_norm + correction;
     blended as i32
 }
