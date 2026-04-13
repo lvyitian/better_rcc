@@ -180,23 +180,28 @@ pub fn advisor_attacks(&self, sq: u8, color: Color) -> u128 {
     let y = (sq / 9) as i8;
     let occ_color = self.occupied(color);
 
-    // 4 diagonal destinations
+    // 4 diagonal destinations, palace-bound
     let deltas = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
     let mut attacks = 0u128;
     for (dx, dy) in deltas {
         let tx = x + dx;
         let ty = y + dy;
-        if (0..9).contains(&tx) && (0..10).contains(&ty) {
-            let tsq = (ty * 9 + tx) as u8;
-            // Filter own-occupied
-            if occ_color & (1_u128 << tsq) == 0 {
-                attacks |= 1_u128 << tsq;
-            }
+        let target = Coord::new(tx, ty);
+        // Palace bounds check
+        if !target.is_valid() || !target.in_palace(color) {
+            continue;
+        }
+        let tsq = (ty * 9 + tx) as u8;
+        // Filter own-occupied
+        if occ_color & (1_u128 << tsq) == 0 {
+            attacks |= 1_u128 << tsq;
         }
     }
     attacks
 }
 ```
+
+Note: `Coord::in_palace(color)` is defined in main.rs and imported into bitboards.rs via the `use crate::` re-exports at the top of bitboards.rs.
 
 **`elephant_attacks(sq: u8, color: Color) -> u128`**
 
@@ -261,12 +266,15 @@ pub fn king_attacks(&self, sq: u8, color: Color) -> u128 {
     for (dx, dy) in offsets {
         let tx = x + dx;
         let ty = y + dy;
-        if (0..9).contains(&tx) && (0..10).contains(&ty) {
-            let tsq = (ty * 9 + tx) as u8;
-            // Filter own-occupied
-            if occ_color & (1_u128 << tsq) == 0 {
-                attacks |= 1_u128 << tsq;
-            }
+        let target = Coord::new(tx, ty);
+        // Palace bounds check
+        if !target.is_valid() || !target.in_palace(color) {
+            continue;
+        }
+        let tsq = (ty * 9 + tx) as u8;
+        // Filter own-occupied
+        if occ_color & (1_u128 << tsq) == 0 {
+            attacks |= 1_u128 << tsq;
         }
     }
     attacks
@@ -519,11 +527,15 @@ This is already handled by the existing `is_legal_move` check — after a provis
 
 ### 9. Elephant river check
 
-`elephant_attacks` already checks `target_coord.crosses_river(color)` — this remains unchanged.
+`elephant_attacks` checks `target_coord.crosses_river(color)` — this remains unchanged.
 
-### 10. Advisor palace check
+### 10. Advisor and King palace checks
 
-`advisor_attacks` does NOT check palace bounds — it returns all 4 diagonal squares. Palace checking is done by the caller or by `is_legal_move`. After migration to bitboards, the same applies: `advisor_attacks` returns raw destinations, and `is_legal_move` will filter illegal ones.
+`advisor_attacks` now checks `target.in_palace(color)` for each diagonal destination — palace bounds are enforced by the method itself.
+
+`king_attacks` now checks `target.in_palace(color)` for each orthogonal destination — palace bounds are enforced by the method itself.
+
+**Note on face-to-face rule**: The king face-to-face rule (kings cannot be on the same file with no pieces between) is **not** encoded in `king_attacks`. This rule requires board-wide information (checking the entire file for pieces) which cannot be determined from a single king's attack map alone. The rule is enforced by `is_legal_move`: after a provisional king move is made, `board.is_check(side)` detects if the king is left in check from face-to-face.
 
 ## Migration order
 
