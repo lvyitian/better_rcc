@@ -1830,9 +1830,22 @@ impl Board {
             return;
         };
 
-        // Update bitboards BEFORE moving pieces
+        // Save NNUE snapshot for undo (before making the move)
+        action.nnue_snapshot = Some(crate::nnue_state::NnueSnapshot::from_board(self));
+
+        // Apply the incremental NNUE update (includes cache insertion and sets dirty=true)
         let src_sq = (action.src.y * 9 + action.src.x) as u8;
         let dst_sq = (action.tar.y * 9 + action.tar.x) as u8;
+        self.nnue_state.apply_move(
+            src_sq,
+            dst_sq,
+            piece,
+            action.captured,
+            &crate::nn_eval::NN_NET,
+            self.zobrist_key,
+        );
+
+        // Update bitboards BEFORE moving pieces
         self.bitboards.apply_move(src_sq, dst_sq, action.captured, piece);
 
         // Move piece to target, clear source
