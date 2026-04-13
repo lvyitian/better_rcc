@@ -359,7 +359,7 @@ impl Coord {
 // =============================================================================
 
 /// Represents a chess move with full context for search and evaluation
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Action {
     pub src: Coord,                  // Source square
     pub tar: Coord,                  // Target square
@@ -1856,7 +1856,10 @@ impl Board {
     /// # Precondition
     /// The move must have been made with make_move() - we assume the history
     /// is consistent. The action's captured field holds what was taken.
-    pub fn undo_move(&mut self, action: Action) {
+    pub fn undo_move(&mut self) {
+        // Pop the last action from history (it contains the NNUE snapshot)
+        let action = self.move_history.pop().expect("undo_move: move_history is empty");
+
         // Restore NNUE state from snapshot
         if let Some(snap) = action.nnue_snapshot {
             self.nnue_state.red_acc = snap.red_acc;
@@ -1887,8 +1890,6 @@ impl Board {
         let zobrist = get_zobrist();
         self.zobrist_key ^= zobrist.side;
         self.current_side = self.current_side.opponent();
-
-        self.move_history.pop();
     }
 
     /// Find the current positions of both kings using bitscan.
@@ -2550,7 +2551,7 @@ pub mod search {
                 board, thread_ctx, shared_tt, -beta, -alpha,
                 side.opponent(), depth + 1, time_ctx
             );
-            board.undo_move(action.clone());
+            board.undo_move();
 
             if time_ctx.is_time_up() {
                 return alpha;
@@ -2747,7 +2748,7 @@ pub mod search {
 
             let mut eval;
             if skip_move {
-                board.undo_move(action.clone());
+                board.undo_move();
                 continue;
             } else if has_pv && !pv_node && !is_in_check && !gives_check && action.captured.is_none() && move_idx >= LMR_MIN_MOVES && depth >= 3 {
                 // Enhanced LMR: reduce more in midgame, less in endgame
@@ -2770,7 +2771,7 @@ pub mod search {
                 );
             }
 
-            board.undo_move(action.clone());
+            board.undo_move();
 
             if time_ctx.is_time_up() {
                 return best_eval.max(alpha);
@@ -3805,6 +3806,7 @@ mod tests {
             rule_set: RuleSet::Official,
             move_history: vec![],
             repetition_history: Default::default(),
+            nnue_state: crate::nnue_state::NnueState::zero(),
         }
     }
 
@@ -4334,7 +4336,7 @@ mod tests {
         assert!(board.cells()[5][4].is_some(), "Target should have piece after move");
 
         // Undo the move
-        board.undo_move(action);
+        board.undo_move();
 
         // Board should be restored
         assert_eq!(board.cells(), initial_cells, "Board should be restored after undo");
@@ -4353,7 +4355,7 @@ mod tests {
         assert!(board.cells()[4][4].is_none(), "Source should be empty");
         assert!(board.cells()[5][4].is_some(), "Target should have chariot");
 
-        board.undo_move(action);
+        board.undo_move();
 
         // After undo, original positions should be restored
         assert!(board.cells()[5][4].is_some(), "Original pawn should be restored");
@@ -4653,7 +4655,7 @@ mod tests {
             // Clone and try make/undo on clone
             let mut board_clone = board.clone();
             board_clone.make_move(chosen);
-            board_clone.undo_move(chosen);
+            board_clone.undo_move();
 
             // Verify board is restored
             assert_eq!(board.cells(), board_clone.cells());
@@ -4694,7 +4696,7 @@ mod tests {
             // Clone and try make/undo on clone
             let mut board_clone = board.clone();
             board_clone.make_move(*action);
-            board_clone.undo_move(*action);
+            board_clone.undo_move();
 
             // Verify board is restored
             assert_eq!(board.cells(), board_clone.cells());
@@ -6631,7 +6633,7 @@ mod tests {
 
             assert_ne!(key_after_make, key_after_move, "Zobrist should change after move");
 
-            board.undo_move(action);
+            board.undo_move();
             let key_after_undo = board.zobrist_key;
 
             assert_eq!(initial_key, key_after_undo,
@@ -6652,7 +6654,7 @@ mod tests {
             }
             let action = legal_moves[0];
             board.make_move(action);
-            board.undo_move(action);
+            board.undo_move();
         }
 
         assert_eq!(initial_key, board.zobrist_key,
@@ -7289,7 +7291,7 @@ mod tests {
         let original_key = board.zobrist_key;
 
         board.make_move(action);
-        board.undo_move(action);
+        board.undo_move();
 
         assert_eq!(board.cells(), original_cells, "Cells should be restored after undo");
         assert_eq!(board.zobrist_key, original_key, "Zobrist key should be restored");
@@ -7305,7 +7307,7 @@ mod tests {
             let original_cells = board.cells();
             board.make_move(action);
             assert!(action.captured.is_some(), "This should be a capture");
-            board.undo_move(action);
+            board.undo_move();
             assert_eq!(board.cells(), original_cells, "Captured piece should be restored");
         }
     }

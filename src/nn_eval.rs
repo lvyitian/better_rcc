@@ -181,7 +181,7 @@ use crate::nnue_input::{INPUT_DIM, FT_DIM, NUM_BUCKETS, QA, QB, SCALE, bucket_in
 
 /// Feature transform output: 1024 i16 values, cache-line aligned for SIMD.
 #[repr(C, align(64))]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Accumulator {
     pub vals: [i16; FT_DIM],
 }
@@ -719,8 +719,13 @@ pub fn nn_evaluate_or_handcrafted(board: &mut Board, side: Color, initiative: bo
     } else {
         // Dirty: try cache first
         if let Some((ra, ba, nc)) = nnue_cache_get(board.zobrist_key) {
-            let stm_acc = if side == Color::Red { &ra } else { &ba };
-            let ntm_acc = if side == Color::Red { &ba } else { &ra };
+            // Write back to board state and mark clean
+            board.nnue_state.red_acc = ra.clone();
+            board.nnue_state.black_acc = ba.clone();
+            board.nnue_state.non_king_count = nc;
+            board.nnue_state.dirty = false;
+            let stm_acc = if side == Color::Red { &board.nnue_state.red_acc } else { &board.nnue_state.black_acc };
+            let ntm_acc = if side == Color::Red { &board.nnue_state.black_acc } else { &board.nnue_state.red_acc };
             NN_NET.forward_output_from_accumulators(stm_acc, ntm_acc, nc)
         } else {
             // Recompute from scratch
@@ -878,7 +883,7 @@ mod tests {
             assert!(!board.nnue_state.dirty, "dirty should be false after evaluation");
 
             // Undo move
-            board.undo_move(action.clone());
+            board.undo_move();
 
             // After undo, state must match saved snapshot
             assert!(!board.nnue_state.dirty, "dirty should be false after undo");

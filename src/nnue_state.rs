@@ -34,7 +34,7 @@ pub fn nnue_cache_remove(key: &u64) {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NnueSnapshot {
     pub red_acc: Accumulator,
     pub black_acc: Accumulator,

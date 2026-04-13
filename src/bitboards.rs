@@ -966,7 +966,7 @@ mod tests {
             }
 
             // Undo and verify
-            board.undo_move(action);
+            board.undo_move();
             let bb_after_undo = Bitboards::from_cells(&board.cells());
             for y in 0..10 {
                 for x in 0..9 {
