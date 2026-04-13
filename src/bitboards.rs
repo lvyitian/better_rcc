@@ -539,6 +539,47 @@ impl Bitboards {
             self.pieces[cp.piece_type as usize][cp.color as usize] |= 1_u128 << dst;
         }
     }
+
+    /// Fill the NNUE input feature planes from bitboards (side-to-move perspective).
+    /// Populates stm_data[1260] array where stm squares are at base 0, opponent at base 630.
+    /// This matches the encoding produced by NNInputPlanes::from_board().
+    pub fn fill_nnue_features(&self, stm: Color, stm_data: &mut [f32; 1260]) {
+        let _ntm = stm.opponent();
+
+        for pt in 0..7 {
+            for c in 0..2 {
+                let bb = self.pieces[pt][c];
+                if bb == 0 { continue; }
+
+                let mut tmp = bb;
+                while tmp != 0 {
+                    let sq = Self::lsb_index(tmp);
+                    let x = (sq % 9) as usize;
+                    let y = (sq / 9) as usize;
+
+                    // stm perspective
+                    let stm_base = if c == stm as usize { 0 } else { 630 };
+                    let stm_sq_idx = y * 9 + x;
+                    let stm_feature = stm_base + pt * 90 + stm_sq_idx;
+                    stm_data[stm_feature] = 1.0;
+
+                    tmp &= tmp - 1; // Clear LSB
+                }
+            }
+        }
+    }
+
+    /// Count total non-king pieces on the board.
+    /// Used for bucket index in NNUE value head.
+    pub fn count_non_king_pieces(&self) -> u8 {
+        let mut count = 0u8;
+        for pt in 0..7 {
+            if pt == PieceType::King as usize { continue; }
+            count += self.pieces[pt][0].count_ones() as u8;
+            count += self.pieces[pt][1].count_ones() as u8;
+        }
+        count
+    }
 }
 
 impl Default for Bitboards {
@@ -683,5 +724,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_bitboards_nnue_equivalence() {
+        use crate::nnue_input::NNInputPlanes;
+        use crate::movegen::generate_legal_moves;
+
+        // Test on initial position
+        let board = Board::new(RuleSet::Official, 1);
+        let bb = &board.bitboards;
+
+        let mut stm_data = [0.0f32; 1260];
+        bb.fill_nnue_features(board.current_side, &mut stm_data);
+
+        let (expected_stm, _expected_ntm) = NNInputPlanes::from_board(&board);
+
+        for i in 0..1260 {
+            assert_eq!(stm_data[i], expected_stm.data[i], "NNUE feature mismatch at index {}", i);
+        }
+
+        // Test after a few random moves
+        let mut board2 = Board::new(RuleSet::Official, 1);
+        for _ in 0..5 {
+            let side = board2.current_side;
+            let mut moves = generate_legal_moves(&mut board2, side);
+            if moves.is_empty() { break; }
+            let idx = (board2.zobrist_key as usize % moves.len()) as usize;
+            board2.make_move(moves[idx]);
+        }
+
+        let bb2 = &board2.bitboards;
+        let mut stm_data2 = [0.0f32; 1260];
+        bb2.fill_nnue_features(board2.current_side, &mut stm_data2);
+
+        let (expected_stm2, _expected_ntm2) = NNInputPlanes::from_board(&board2);
+        for i in 0..1260 {
+            assert_eq!(stm_data2[i], expected_stm2.data[i], "NNUE feature mismatch after moves at index {}", i);
+        }
+    }
+
+    #[test]
+    fn test_count_non_king_pieces() {
+        let board = Board::new(RuleSet::Official, 1);
+        let bb = Bitboards::from_cells(&board.cells);
+
+        let count = bb.count_non_king_pieces();
+        // Initial position: 32 pieces total, 2 kings -> 30 non-kings
+        assert_eq!(count, 30, "Initial position should have 30 non-king pieces");
     }
 }
