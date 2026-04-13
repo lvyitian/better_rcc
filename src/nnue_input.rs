@@ -7,7 +7,7 @@
 //!
 //! Each 630-feature block is organized as 7 piece types × 90 squares.
 
-use crate::{Board, Coord, PieceType};
+use crate::{Board, Coord};
 
 /// Input dimension: 1260 = 2 × 630 = 2 × (7 × 90)
 pub const INPUT_DIM: usize = 1260;
@@ -104,7 +104,7 @@ pub fn count_non_king_pieces(board: &Board) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Board, Color, Piece, PieceType, RuleSet};
+    use crate::{Board, PieceType, RuleSet};
 
     #[test]
     fn test_bucket_index() {

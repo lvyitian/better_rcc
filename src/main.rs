@@ -1776,7 +1776,7 @@ impl Board {
     /// Used primarily for testing compatibility.
     #[inline(always)]
     pub fn cells(&self) -> [[Option<Piece>; 9]; 10] {
-        self.bitboards.to_cells()
+        self.bitboards.as_cells()
     }
 
     /// Internal helper to set a piece and update Zobrist hash only.
@@ -3625,7 +3625,7 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
                 let ndarray_bytes: Vec<u8> = match NNUEFeedForward::from_file_impl(bin_path) {
                     Ok(net) => {
                         eprintln!("已加载 inference 权重 from {}", bin_path);
-                        net.to_bytes().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+                        net.to_bytes().map_err(std::io::Error::other)?
                     }
                     Err(e) => {
                         eprintln!("加载 {} 失败: {}，无法转换", bin_path, e);

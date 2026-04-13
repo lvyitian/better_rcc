@@ -124,37 +124,33 @@ pub fn init_non_slide_attacks() -> (
         let y = (sq / 9) as i8;
 
         // Horse: 8 L-shape destinations (knee position checked separately by caller)
-        for i in 0..8 {
-            let (dx, dy) = horse_deltas[i];
+        for (i, &(dx, dy)) in horse_deltas.iter().enumerate() {
             let tx = x + dx;
             let ty = y + dy;
-            if tx >= 0 && tx < 9 && ty >= 0 && ty < 10 {
+            if (0..9).contains(&tx) && (0..10).contains(&ty) {
                 let tsq = (ty * 9 + tx) as u8;
                 horse_attacks[sq][i] = 1_u128 << tsq;
             }
         }
 
         // Advisor: 4 diagonal destinations (palace-bound checked by caller)
-        for i in 0..4 {
-            let (dx, dy) = advisor_deltas[i];
+        for (i, &(dx, dy)) in advisor_deltas.iter().enumerate() {
             let tx = x + dx;
             let ty = y + dy;
-            if tx >= 0 && tx < 9 && ty >= 0 && ty < 10 {
+            if (0..9).contains(&tx) && (0..10).contains(&ty) {
                 let tsq = (ty * 9 + tx) as u8;
                 advisor_attacks[sq][i] = 1_u128 << tsq;
             }
         }
 
         // Elephant: 4 diagonal destinations (river-bound + eye-check done by caller)
-        for i in 0..4 {
-            let (dx, dy) = elephant_deltas[i];
-            let (bx, by) = elephant_blocks[i];
+        for (i, ((dx, dy), (bx, by))) in elephant_deltas.iter().zip(elephant_blocks.iter()).enumerate() {
             let tx = x + dx;
             let ty = y + dy;
             let ex = x + bx;
             let ey = y + by;
-            if tx >= 0 && tx < 9 && ty >= 0 && ty < 10
-                && ex >= 0 && ex < 9 && ey >= 0 && ey < 10
+            if (0..9).contains(&tx) && (0..10).contains(&ty)
+                && (0..9).contains(&ex) && (0..10).contains(&ey)
             {
                 let tsq = (ty * 9 + tx) as u8;
                 elephant_attacks[sq][i] = 1_u128 << tsq;
@@ -162,11 +158,10 @@ pub fn init_non_slide_attacks() -> (
         }
 
         // King: 4 orthogonal destinations (palace-bound checked by caller)
-        for i in 0..4 {
-            let (dx, dy) = king_offsets[i];
+        for (dx, dy) in king_offsets {
             let tx = x + dx;
             let ty = y + dy;
-            if tx >= 0 && tx < 9 && ty >= 0 && ty < 10 {
+            if (0..9).contains(&tx) && (0..10).contains(&ty) {
                 let tsq = (ty * 9 + tx) as u8;
                 king_attacks[sq] |= 1_u128 << tsq;
             }
@@ -282,7 +277,7 @@ impl Bitboards {
     /// Reconstruct the 10x9 cells array from bitboards.
     /// Used primarily for testing to maintain compatibility with tests that
     /// reference board cells.
-    pub fn to_cells(&self) -> [[Option<Piece>; 9]; 10] {
+    pub fn as_cells(&self) -> [[Option<Piece>; 9]; 10] {
         let mut cells = [[None; 9]; 10];
         for y in 0..10 {
             for x in 0..9 {
@@ -436,10 +431,10 @@ impl Bitboards {
             let blockers = ray & occ;
             if blockers == 0 { continue; }
             let nearest = Self::lsb_index(blockers);
-            if occ_color & (1_u128 << nearest) != 0 {
-                if self.pieces[PieceType::Chariot as usize][color as usize] & (1_u128 << nearest) != 0 {
-                    attackers |= 1_u128 << nearest;
-                }
+            if occ_color & (1_u128 << nearest) != 0
+                && self.pieces[PieceType::Chariot as usize][color as usize] & (1_u128 << nearest) != 0
+            {
+                attackers |= 1_u128 << nearest;
             }
         }
 
@@ -716,6 +711,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unused_variables)]
     fn test_bitboards_apply_and_undo_move() {
         let mut board = Board::new(RuleSet::Official, 1);
         let moves = movegen::generate_legal_moves(&mut board, Color::Red);
@@ -746,17 +742,13 @@ mod tests {
 
         if let Some(first_move) = moves.first() {
             let action = *first_move;
-            let src_sq = sq_from_coord(action.src.x, action.src.y);
-            let dst_sq = sq_from_coord(action.tar.x, action.tar.y);
-            let piece = board.get(action.src).unwrap();
-            let captured = action.captured;
 
             // Before move: bitboards should match cells
             let bb_before = Bitboards::from_cells(&board.cells());
             for y in 0..10 {
                 for x in 0..9 {
                     let coord = Coord::new(x, y);
-                    let sq = sq_from_coord(x, y);
+                    let sq = (y * 9 + x) as u8;
                     assert_eq!(board.get(coord), bb_before.piece_at(sq), "Pre-move mismatch at ({x}, {y})");
                 }
             }
@@ -767,7 +759,7 @@ mod tests {
             for y in 0..10 {
                 for x in 0..9 {
                     let coord = Coord::new(x, y);
-                    let sq = sq_from_coord(x, y);
+                    let sq = (y * 9 + x) as u8;
                     assert_eq!(board.get(coord), board.bitboards.piece_at(sq), "Post-move mismatch at ({x}, {y})");
                 }
             }
@@ -778,7 +770,7 @@ mod tests {
             for y in 0..10 {
                 for x in 0..9 {
                     let coord = Coord::new(x, y);
-                    let sq = sq_from_coord(x, y);
+                    let sq = (y * 9 + x) as u8;
                     assert_eq!(board.get(coord), bb_after_undo.piece_at(sq), "Post-undo mismatch at ({x}, {y})");
                 }
             }

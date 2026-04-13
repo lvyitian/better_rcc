@@ -415,11 +415,11 @@ impl NNUEFeedForward {
         if data.len() >= 4 {
             let raw_size = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
             let compressed = &data[4..];
-            if let Ok(decompressed) = zstd::decode_all(compressed) {
-                if decompressed.len() == raw_size {
-                    eprintln!("[NNUE] loaded weights from '{}' (zstd)", path);
-                    return Self::from_bytes(&decompressed);
-                }
+            if let Ok(decompressed) = zstd::decode_all(compressed)
+                && decompressed.len() == raw_size
+            {
+                eprintln!("[NNUE] loaded weights from '{}' (zstd)", path);
+                return Self::from_bytes(&decompressed);
             }
         }
 
