@@ -125,10 +125,13 @@ impl NnueState {
                     persp_acc.vals[i] = persp_acc.vals[i]
                         .saturating_sub(nn.ft_weights[capt_idx].vals[i]);
                 }
+            }
+        }
 
-                if cp.piece_type != PieceType::King {
-                    self.non_king_count = self.non_king_count.saturating_sub(1);
-                }
+        // Decrement non_king_count ONCE, outside the perspective loop
+        if let Some(cp) = captured {
+            if cp.piece_type != PieceType::King {
+                self.non_king_count = self.non_king_count.saturating_sub(1);
             }
         }
 
