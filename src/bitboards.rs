@@ -464,9 +464,53 @@ impl Bitboards {
         attacks
     }
 
-    /// Elephant attacks from sq — 4 diagonal destinations (river-bound checked by caller).
-    pub fn elephant_attacks(&self, sq: u8) -> u128 {
-        get_elephant_attacks()[sq as usize].iter().fold(0u128, |acc, &m| acc | m)
+    /// Elephant attacks from sq — 4 diagonal destinations, eye must be empty, cannot cross river.
+    /// Returns empty or enemy-capturable squares.
+    pub fn elephant_attacks(&self, sq: u8, color: Color) -> u128 {
+        let x = (sq % 9) as i8;
+        let y = (sq / 9) as i8;
+        let occ_color = self.occupied(color);
+        let occ_all = self.occupied_all();
+
+        let deltas = [(2, 2), (2, -2), (-2, 2), (-2, -2)];
+        let blocks = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+        let mut attacks = 0u128;
+        for i in 0..4 {
+            let (dx, dy) = deltas[i];
+            let (bx, by) = blocks[i];
+            let tx = x + dx;
+            let ty = y + dy;
+            let bx = x + bx;
+            let by = y + by;
+
+            // Eye square must be on board and empty
+            if (0..9).contains(&bx) && (0..10).contains(&by) {
+                let eye_sq = (by * 9 + bx) as u8;
+                if occ_all & (1_u128 << eye_sq) != 0 {
+                    continue; // eye is blocked
+                }
+            } else {
+                continue; // eye off board
+            }
+
+            // Target must be on board
+            if !(0..9).contains(&tx) || !(0..10).contains(&ty) {
+                continue;
+            }
+
+            // River check: elephant cannot cross
+            let target_coord = Coord::new(tx, ty);
+            if target_coord.crosses_river(color) {
+                continue;
+            }
+
+            let tsq = (ty * 9 + tx) as u8;
+            // Target must not be own-occupied
+            if occ_color & (1_u128 << tsq) == 0 {
+                attacks |= 1_u128 << tsq;
+            }
+        }
+        attacks
     }
 
     /// King attacks from sq — 4 orthogonal destinations (palace-bound checked by caller).
