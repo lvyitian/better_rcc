@@ -421,7 +421,7 @@ pub mod nn_train_impl {
         for f in 0..INPUT_DIM {
             for i in 0..FT_DIM {
                 let w = ft_weight_data[i * INPUT_DIM + f];
-                let w_i16 = (w.round() as i32).clamp(-i32::from(QA), i32::from(QA)) as i16;
+                let w_i16 = (w.round() as i32).clamp(-QA, QA) as i16;
                 ft_weights_flat.push(w_i16);
             }
         }
@@ -429,7 +429,7 @@ pub mod nn_train_impl {
         let mut ft_bias_i16 = Vec::with_capacity(FT_DIM);
         for i in 0..FT_DIM {
             let w = ft_bias_data[i];
-            let w_i16 = (w.round() as i32).clamp(-i32::from(QA), i32::from(QA)) as i16;
+            let w_i16 = (w.round() as i32).clamp(-QA, QA) as i16;
             ft_bias_i16.push(w_i16);
         }
 
@@ -438,7 +438,7 @@ pub mod nn_train_impl {
         for b in 0..NUM_BUCKETS {
             for i in 0..FT_DIM * 2 {
                 let w = out_weight_data[b * (FT_DIM * 2) + i];
-                let w_i16 = (w.round() as i32).clamp(-i32::from(QA), i32::from(QA)) as i16;
+                let w_i16 = (w.round() as i32).clamp(-QA, QA) as i16;
                 out_weights_flat.push(w_i16);
             }
         }
@@ -446,7 +446,7 @@ pub mod nn_train_impl {
         let mut out_bias_i16 = Vec::with_capacity(NUM_BUCKETS);
         for i in 0..NUM_BUCKETS {
             let w = out_bias_data[i];
-            let w_i16 = (w.round() as i32).clamp(-i32::from(QA), i32::from(QA)) as i16;
+            let w_i16 = (w.round() as i32).clamp(-QA, QA) as i16;
             out_bias_i16.push(w_i16);
         }
 

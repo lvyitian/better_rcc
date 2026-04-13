@@ -8,7 +8,8 @@
 //! - Opening book for common patterns
 //! - Endgame tablebase for simplified positions
 
-use std::cell::RefCell;
+use crate::bitboards::Bitboards;
+
 use std::fmt;
 use std::io;
 use std::io::Write;
@@ -322,8 +323,7 @@ impl Coord {
     /// Unlike most board regions, this one is symmetric — the same absolute
     /// coordinates apply to both colors.
     #[inline(always)]
-    pub fn in_core_area(self, color: Color) -> bool {
-        let _ = color; // Suppress unused warning for API symmetry
+    pub fn in_core_area(self) -> bool {
         self.x >= CORE_X_MIN && self.x <= CORE_X_MAX
             && self.y >= CORE_Y_MIN && self.y <= CORE_Y_MAX
     }
@@ -916,18 +916,14 @@ pub mod book {
                 && black[PieceType::Advisor as usize] == 1
                 && black_other == 1
             {
-                // Find pawn position - scan efficiently
-                let pawn_pos = board.cells.iter()
-                    .enumerate()
-                    .find_map(|(y, row)| {
-                        row.iter().enumerate().find_map(|(x, &p)| {
-                            if p == Some(Piece { color: Color::Red, piece_type: PieceType::Pawn }) {
-                                Some(Coord::new(x as i8, y as i8))
-                            } else {
-                                None
-                            }
-                        })
-                    });
+                // Find pawn position using bitboards
+                let pawn_bb = board.bitboards.piece_bitboard(PieceType::Pawn, Color::Red);
+                let pawn_pos = if pawn_bb != 0 {
+                    let sq = Bitboards::lsb_index(pawn_bb);
+                    Some(Coord::new((sq % 9) as i8, (sq / 9) as i8))
+                } else {
+                    None
+                };
 
                 if let Some(pos) = pawn_pos
                     && pos.crosses_river(Color::Red) {
@@ -1381,15 +1377,17 @@ pub mod movegen {
         };
         let captured = action.captured;
 
-        board.cells[tar.y as usize][tar.x as usize] = Some(piece);
-        board.cells[src.y as usize][src.x as usize] = None;
+        // Make provisional move using bitboards (Zobrist not updated - this is temporary)
+        let src_sq = src.y as u8 * 9 + src.x as u8;
+        let tar_sq = tar.y as u8 * 9 + tar.x as u8;
+        board.bitboards.apply_move(src_sq, tar_sq, captured, piece);
 
         let is_self_checked = board.is_check(side);
         let legal = !is_self_checked;
         let gives_check = legal && board.is_check(side.opponent());
 
-        board.cells[src.y as usize][src.x as usize] = Some(piece);
-        board.cells[tar.y as usize][tar.x as usize] = captured;
+        // Undo provisional move using bitboards
+        board.bitboards.undo_move(src_sq, tar_sq, captured, piece);
 
         (legal, gives_check)
     }
@@ -1459,8 +1457,11 @@ pub mod movegen {
 
         let mut board_copy = board.clone();
         let moving_piece = board_copy.get(current_attacker).unwrap();
+        let src_sq = (current_attacker.y * 9 + current_attacker.x) as u8;
+        let tar_sq = (tar.y * 9 + tar.x) as u8;
         board_copy.set_internal(tar, Some(moving_piece));
         board_copy.set_internal(current_attacker, None);
+        board_copy.bitboards.apply_move(src_sq, tar_sq, board.get(tar), moving_piece);
         side = side.opponent();
 
         loop {
@@ -1473,8 +1474,10 @@ pub mod movegen {
             swap_idx += 1;
 
             let attacker_piece = board_copy.get(attacker.unwrap()).unwrap();
+            let att_sq = (attacker.unwrap().y * 9 + attacker.unwrap().x) as u8;
             board_copy.set_internal(tar, Some(attacker_piece));
             board_copy.set_internal(attacker.unwrap(), None);
+            board_copy.bitboards.apply_move(att_sq, tar_sq, board_copy.get(tar), attacker_piece);
             side = side.opponent();
 
             if attacker_piece.piece_type == PieceType::King {
@@ -1493,145 +1496,65 @@ pub mod movegen {
     /// Find the least valuable piece that can attack a target square
     /// Returns (position, value) of the attacker
     /// Used by SEE to determine capture sequences
-    /// Optimized: searches outward from target instead of scanning all 90 squares
-    // Search for least valuable attacker of given side that can capture target position.
-    // Attack direction: from attacker SRC to target TAR = TAR - SRC = direction.
-    // Therefore: SRC = TAR - direction. We SUBTRACT deltas to find attackers.
+    /// Bitboard version: uses attackers() bitboard and finds least valuable by priority order
     fn find_least_valuable_attacker(board: &Board, tar: Coord, side: Color) -> (Option<Coord>, i32) {
-        let mut min_value = i32::MAX;
-        let mut min_attacker = None;
+        let tar_sq = (tar.y * 9 + tar.x) as u8;
+        let attackers_bb = board.bitboards.attackers(tar_sq, side);
 
-        // Search outward from target: O(1-16) for sliding pieces instead of O(90)
-
-        // Check chariot attacks (rook-like, searches along row/column)
-        // If chariot at (3, 5) attacks tar at (3, 3) moving UP, direction is (0, -1).
-        // To find it: start at tar(3,3), move toward attacker = SUBTRACT (0, -1) → (3,4) → (3,5)
-        for (dx, dy) in DIRS_4 {
-            let mut x = tar.x - dx;  // SUBTRACT to search toward attacker
-            let mut y = tar.y - dy;
-            let mut jumped = false;
-            while (0..BOARD_WIDTH).contains(&x) && (0..BOARD_HEIGHT).contains(&y) {
-                let pos = Coord::new(x, y);
-                if let Some(piece) = board.get(pos) {
-                    if piece.color == side {
-                        // Chariot attacks if no pieces between
-                        if !jumped && piece.piece_type == PieceType::Chariot && SEE_VALUE[PieceType::Chariot as usize] < min_value {
-                            min_value = SEE_VALUE[PieceType::Chariot as usize];
-                            min_attacker = Some(pos);
-                        }
-                        // Cannon attacks if exactly one screen between
-                        if jumped && piece.piece_type == PieceType::Cannon && SEE_VALUE[PieceType::Cannon as usize] < min_value {
-                            min_value = SEE_VALUE[PieceType::Cannon as usize];
-                            min_attacker = Some(pos);
-                        }
-                    }
-                    break;
-                }
-                x -= dx;  // Continue toward attacker
-                y -= dy;
-                jumped = true; // First piece encountered is the screen for cannon
-            }
+        if attackers_bb == 0 {
+            return (None, i32::MAX);
         }
 
-        // Check horse attacks (8 landing spots around target)
-        // Horse at SRC attacks tar at TAR: SRC = TAR - HORSE_DELTA
-        // Block position = SRC + BLOCKS (knee point offset from horse's src)
-        for i in 0..8 {
-            let (ox, oy) = HORSE_DELTAS[i];
-            let (bx, by) = HORSE_BLOCKS[i];
-            let horse_pos = Coord::new(tar.x - ox, tar.y - oy);  // SRC = TAR - delta
-            let block_pos = Coord::new(horse_pos.x + bx, horse_pos.y + by);  // BLOCK = SRC + BLOCKS
-            if horse_pos.is_valid() && board.get(block_pos).is_none()
-                && let Some(piece) = board.get(horse_pos)
-                    && piece.color == side && piece.piece_type == PieceType::Horse && SEE_VALUE[PieceType::Horse as usize] < min_value {
-                        min_value = SEE_VALUE[PieceType::Horse as usize];
-                        min_attacker = Some(horse_pos);
-                    }
+        // Check pawns first (lowest value in SEE_VALUE)
+        let pawns = attackers_bb & board.bitboards.piece_bitboard(PieceType::Pawn, side);
+        if pawns != 0 {
+            let sq = Bitboards::lsb_index(pawns);
+            return (Some(Coord::new((sq % 9) as i8, (sq / 9) as i8)), SEE_VALUE[PieceType::Pawn as usize]);
         }
 
-        // Check elephant attacks (4 spots, must stay on same side of river)
-        // Elephant at SRC attacks tar at TAR: SRC = TAR - ELEPHANT_DELTA
-        // Eye position = SRC + BLOCKS (eye is midpoint between elephant and tar)
-        for i in 0..4 {
-            let (ox, oy) = ELEPHANT_DELTAS[i];
-            let (bx, by) = ELEPHANT_BLOCKS[i];
-            let ele_pos = Coord::new(tar.x - ox, tar.y - oy);  // SRC = TAR - delta
-            let block_pos = Coord::new(ele_pos.x + bx, ele_pos.y + by);  // BLOCK = SRC + BLOCKS
-            if ele_pos.is_valid() && !ele_pos.crosses_river(side) && board.get(block_pos).is_none()
-                && let Some(piece) = board.get(ele_pos)
-                    && piece.color == side && piece.piece_type == PieceType::Elephant && SEE_VALUE[PieceType::Elephant as usize] < min_value {
-                        min_value = SEE_VALUE[PieceType::Elephant as usize];
-                        min_attacker = Some(ele_pos);
-                    }
+        // Check elephants
+        let elephants = attackers_bb & board.bitboards.piece_bitboard(PieceType::Elephant, side);
+        if elephants != 0 {
+            let sq = Bitboards::lsb_index(elephants);
+            return (Some(Coord::new((sq % 9) as i8, (sq / 9) as i8)), SEE_VALUE[PieceType::Elephant as usize]);
         }
 
-        // Check advisor attacks (4 spots within palace)
-        // Advisor at SRC attacks tar at TAR: SRC = TAR - ADVISOR_DELTA
-        for (ox, oy) in ADVISOR_DELTAS {
-            let adv_pos = Coord::new(tar.x - ox, tar.y - oy);  // SUBTRACT
-            if adv_pos.is_valid() && adv_pos.in_palace(side)
-                && let Some(piece) = board.get(adv_pos)
-                    && piece.color == side && piece.piece_type == PieceType::Advisor && SEE_VALUE[PieceType::Advisor as usize] < min_value {
-                        min_value = SEE_VALUE[PieceType::Advisor as usize];
-                        min_attacker = Some(adv_pos);
-                    }
+        // Check advisors
+        let advisors = attackers_bb & board.bitboards.piece_bitboard(PieceType::Advisor, side);
+        if advisors != 0 {
+            let sq = Bitboards::lsb_index(advisors);
+            return (Some(Coord::new((sq % 9) as i8, (sq / 9) as i8)), SEE_VALUE[PieceType::Advisor as usize]);
         }
 
-        // Check king attacks (4 adjacent squares within palace)
-        // King at SRC attacks tar at TAR: SRC = TAR - KING_DELTA
-        for (ox, oy) in DIRS_4 {
-            let king_pos = Coord::new(tar.x - ox, tar.y - oy);  // SUBTRACT
-            if king_pos.is_valid() && king_pos.in_palace(side)
-                && let Some(piece) = board.get(king_pos)
-                    && piece.color == side && piece.piece_type == PieceType::King && SEE_VALUE[PieceType::King as usize] < min_value {
-                        min_value = SEE_VALUE[PieceType::King as usize];
-                        min_attacker = Some(king_pos);
-                    }
+        // Check horses
+        let horses = attackers_bb & board.bitboards.piece_bitboard(PieceType::Horse, side);
+        if horses != 0 {
+            let sq = Bitboards::lsb_index(horses);
+            return (Some(Coord::new((sq % 9) as i8, (sq / 9) as i8)), SEE_VALUE[PieceType::Horse as usize]);
         }
 
-        // Check pawn attacks
-        // Red pawns move toward y=0, so a Red pawn attacking tar must be AHEAD (lower y).
-        // If pawn at (x, y) attacks tar at (tx, ty), then: pawn is at (tx, ty+1) for forward attack.
-        // So: pawn_pos = tar - (0, -1) for Red, pawn_pos = tar - (0, 1) for Black
-        // Pawn offsets: Red=(0, -1), Black=(0, 1) - pawn moves toward these to attack
-        let pawn_offsets: &[(i8, i8)] = if side == Color::Red {
-            &[(0, -1)] // Red forward: pawn is at (tar.x, tar.y - 1)
-        } else {
-            &[(0, 1)] // Black forward: pawn is at (tar.x, tar.y + 1)
-        };
-        // Pawn diagonals: Red=(±1, -1), Black=(±1, 1) - side attacks
-        let pawn_diagonals: &[(i8, i8)] = if side == Color::Red {
-            &[(-1, -1), (1, -1)] // Red side: pawn at (tar.x±1, tar.y-1)
-        } else {
-            &[(-1, 1), (1, 1)] // Black side: pawn at (tar.x±1, tar.y+1)
-        };
-
-        // Forward attack
-        for (dx, dy) in pawn_offsets {
-            let pawn_pos = Coord::new(tar.x - dx, tar.y - dy);  // SUBTRACT
-            if pawn_pos.is_valid()
-                && let Some(piece) = board.get(pawn_pos)
-                    && piece.color == side && piece.piece_type == PieceType::Pawn && SEE_VALUE[PieceType::Pawn as usize] < min_value {
-                        min_value = SEE_VALUE[PieceType::Pawn as usize];
-                        min_attacker = Some(pawn_pos);
-                    }
+        // Check cannons
+        let cannons = attackers_bb & board.bitboards.piece_bitboard(PieceType::Cannon, side);
+        if cannons != 0 {
+            let sq = Bitboards::lsb_index(cannons);
+            return (Some(Coord::new((sq % 9) as i8, (sq / 9) as i8)), SEE_VALUE[PieceType::Cannon as usize]);
         }
 
-        // Side attacks (only if pawn has crossed river)
-        let crosses_river = if side == Color::Red { tar.y <= RIVER_BOUNDARY_RED } else { tar.y >= RIVER_BOUNDARY_BLACK };
-        if crosses_river {
-            for (dx, dy) in pawn_diagonals {
-                let pawn_pos = Coord::new(tar.x - dx, tar.y - dy);  // SUBTRACT
-                if pawn_pos.is_valid()
-                    && let Some(piece) = board.get(pawn_pos)
-                        && piece.color == side && piece.piece_type == PieceType::Pawn && SEE_VALUE[PieceType::Pawn as usize] < min_value {
-                            min_value = SEE_VALUE[PieceType::Pawn as usize];
-                            min_attacker = Some(pawn_pos);
-                        }
-            }
+        // Check chariots
+        let chariots = attackers_bb & board.bitboards.piece_bitboard(PieceType::Chariot, side);
+        if chariots != 0 {
+            let sq = Bitboards::lsb_index(chariots);
+            return (Some(Coord::new((sq % 9) as i8, (sq / 9) as i8)), SEE_VALUE[PieceType::Chariot as usize]);
         }
 
-        (min_attacker, min_value)
+        // Check king
+        let kings = attackers_bb & board.bitboards.piece_bitboard(PieceType::King, side);
+        if kings != 0 {
+            let sq = Bitboards::lsb_index(kings);
+            return (Some(Coord::new((sq % 9) as i8, (sq / 9) as i8)), SEE_VALUE[PieceType::King as usize]);
+        }
+
+        (None, i32::MAX)
     }
 }
 
@@ -1655,18 +1578,14 @@ pub mod movegen {
 /// - `zobrist_key`: Incremental hash of position, updated on each move
 /// - `move_history`: Stack of all moves for undo and repetition detection
 /// - `repetition_history`: HashMap counting position occurrences for repetition rules
-/// - `king_pos`: Cached king positions [Red, Black] for O(1) lookup instead of O(90) scan; None = cache invalid, Some(pos) = position known
 #[derive(Clone)]
 pub struct Board {
-    pub cells: [[Option<Piece>; 9]; 10],  // cells[y][x], None = empty
+    pub bitboards: Bitboards,
     pub zobrist_key: u64,                  // Incremental position hash
     pub current_side: Color,                // Side to move
     pub rule_set: RuleSet,                 // Game rules (affects repetition detection)
     pub move_history: Vec<Action>,          // Move stack for undo/display
     pub repetition_history: HashMap<u64, u8>, // Position count for repetition
-    // Cached king positions [Red, Black] for O(1) lookup instead of O(90) scan
-    // None = cache invalid, Some(pos) = position known
-    pub king_pos: RefCell<[Option<Coord>; 2]>,
 }
 
 impl Board {
@@ -1739,13 +1658,12 @@ impl Board {
         repetition_history.insert(zobrist_key, 1);
 
         Board {
-            cells,
+            bitboards: Bitboards::from_cells(&cells),
             zobrist_key,
             current_side: match order { 1 => Color::Red, 2 => Color::Black, _=>unreachable!() },
             rule_set,
             move_history: Vec::with_capacity(200),
             repetition_history,
-            king_pos: RefCell::new([None, None]),
         }
     }
 
@@ -1836,96 +1754,48 @@ impl Board {
         let mut repetition_history = HashMap::new();
         repetition_history.insert(zobrist_key, 1);
 
-        // Scan for king positions to populate cache
-        let mut king_pos = [None; 2];
-        #[allow(clippy::needless_range_loop)]
-        for y in 0..10 {
-            #[allow(clippy::needless_range_loop)]
-            for x in 0..9 {
-                if let Some(Piece { color, piece_type }) = cells[y][x]
-                    && piece_type == PieceType::King
-                {
-                    let idx = match color {
-                        Color::Red => 0,
-                        Color::Black => 1,
-                    };
-                    king_pos[idx] = Some(Coord::new(x as i8, y as i8));
-                }
-            }
-        }
-
         Board {
-            cells,
+            bitboards: Bitboards::from_cells(&cells),
             zobrist_key,
             current_side,
             rule_set: RuleSet::Official,
             move_history: Vec::with_capacity(200),
             repetition_history,
-            king_pos: RefCell::new(king_pos),
         }
     }
     #[inline(always)]
     pub fn get(&self, coord: Coord) -> Option<Piece> {
         if coord.is_valid() {
-            self.cells[coord.y as usize][coord.x as usize]
+            self.bitboards.piece_at(coord.y as u8 * 9 + coord.x as u8)
         } else {
             None
         }
     }
 
-    /// Internal helper to set a piece and update Zobrist hash
-    ///
-    /// This is the core method for modifying the board. It uses XOR operations
-    /// to incrementally update the Zobrist hash:
-    /// - Remove old piece hash by XORing it again
-    /// - Add new piece hash by XORing it in
-    /// - For empty squares, just remove the old hash
-    ///
-    /// This O(1) update is why Zobrist hashing is efficient for chess engines.
+    /// Reconstruct the 10x9 cells array from bitboards.
+    /// Used primarily for testing compatibility.
+    #[inline(always)]
+    pub fn cells(&self) -> [[Option<Piece>; 9]; 10] {
+        self.bitboards.as_cells()
+    }
+
+    /// Internal helper to set a piece and update Zobrist hash only.
+    /// Since cells is removed, this only updates the Zobrist hash.
+    /// Bitboards are NOT updated here — callers must use bitboards.apply_move.
     #[inline(always)]
     pub fn set_internal(&mut self, coord: Coord, piece: Option<Piece>) {
-        if !coord.is_valid() {
-            return;
-        }
         let zobrist = get_zobrist();
-        let pos_idx = zobrist.pos_idx(coord);
 
-        // Capture old piece before mutation for cache update
-        let old_piece = self.cells[coord.y as usize][coord.x as usize];
-
-        // XOR-out the old piece (XOR is self-inverse: A^B^B = A)
-        if let Some(old_p) = old_piece {
-            self.zobrist_key ^= zobrist.pieces[pos_idx][old_p.color as usize][old_p.piece_type as usize];
-        }
-        // XOR-in the new piece
-        if let Some(new_p) = piece {
-            self.zobrist_key ^= zobrist.pieces[pos_idx][new_p.color as usize][new_p.piece_type as usize];
+        // Remove old piece from hash
+        if let Some(old) = self.get(coord) {
+            let old_idx = zobrist.pos_idx(coord);
+            self.zobrist_key ^= zobrist.pieces[old_idx][old.color as usize][old.piece_type as usize];
         }
 
-        self.cells[coord.y as usize][coord.x as usize] = piece;
-
-        // Update or invalidate king cache for the affected side
-        let old_is_king = old_piece.is_some_and(|p| p.piece_type == PieceType::King);
-        let new_is_king = piece.is_some_and(|p| p.piece_type == PieceType::King);
-
-        if old_is_king || new_is_king {
-            let mut cached = self.king_pos.borrow_mut();
-            if old_is_king {
-                // King moved away from this square — invalidate that side's cache
-                let color = old_piece.unwrap().color;
-                match color {
-                    Color::Red => cached[0] = None,
-                    Color::Black => cached[1] = None,
-                }
-            }
-            if new_is_king {
-                // King moved to this square — set cache to new position
-                let color = piece.unwrap().color;
-                match color {
-                    Color::Red => cached[0] = Some(coord),
-                    Color::Black => cached[1] = Some(coord),
-                }
-            }
+        // Add new piece to hash
+        if let Some(new_piece) = piece {
+            let new_idx = zobrist.pos_idx(coord);
+            self.zobrist_key ^= zobrist.pieces[new_idx][new_piece.color as usize][new_piece.piece_type as usize];
         }
     }
 
@@ -1948,6 +1818,11 @@ impl Board {
             return;
         };
 
+        // Update bitboards BEFORE moving pieces
+        let src_sq = (action.src.y * 9 + action.src.x) as u8;
+        let dst_sq = (action.tar.y * 9 + action.tar.x) as u8;
+        self.bitboards.apply_move(src_sq, dst_sq, action.captured, piece);
+
         // Move piece to target, clear source
         self.set_internal(action.tar, Some(piece));
         self.set_internal(action.src, None);
@@ -1967,9 +1842,6 @@ impl Board {
         self.move_history.push(action);
         // Increment position repetition count (for detecting 3-fold repetition)
         *self.repetition_history.entry(self.zobrist_key).or_insert(0) += 1;
-
-        // Update king cache to reflect the new positions
-        self.update_king_cache_on_move(&action);
     }
 
     /// Undo a move, restoring the previous position
@@ -1993,6 +1865,11 @@ impl Board {
         }
 
         let piece = self.get(action.tar).expect("undo_move: tar square must not be empty");
+        // Update bitboards BEFORE restoring pieces
+        let src_sq = (action.src.y * 9 + action.src.x) as u8;
+        let dst_sq = (action.tar.y * 9 + action.tar.x) as u8;
+        self.bitboards.undo_move(src_sq, dst_sq, action.captured, piece);
+
         self.set_internal(action.src, Some(piece));
         self.set_internal(action.tar, action.captured);
 
@@ -2003,102 +1880,11 @@ impl Board {
         self.move_history.pop();
     }
 
-    /// Find the current positions of both kings
-    ///
-    /// Scans the board for the King piece of each color.
+    /// Find the current positions of both kings using bitscan.
     /// Returns (red_king_pos, black_king_pos) - either may be None if captured.
-    ///
-    /// # Caching
-    /// Uses cached king positions when valid, falls back to O(90) scan only when cache is invalid.
-    /// A cache entry is only trusted if it actually points to a King of the correct color.
-    /// If only one cache entry is valid, the other is found via targeted scan.
     #[inline(always)]
     pub fn find_kings(&self) -> (Option<Coord>, Option<Coord>) {
-        let cached = self.king_pos.borrow();
-
-        // Validate both caches before trusting them
-        let rk_pos = if cached[0].is_some()
-            && !self.cells[cached[0].unwrap().y as usize][cached[0].unwrap().x as usize]
-                .is_some_and(|p| p.piece_type == PieceType::King && p.color == Color::Red) {
-            None
-        } else {
-            cached[0]
-        };
-
-        let bk_pos = if cached[1].is_some()
-            && !self.cells[cached[1].unwrap().y as usize][cached[1].unwrap().x as usize]
-                .is_some_and(|p| p.piece_type == PieceType::King && p.color == Color::Black) {
-            None
-        } else {
-            cached[1]
-        };
-        drop(cached);
-
-        // Both caches valid — return immediately
-        if rk_pos.is_some() && bk_pos.is_some() {
-            return (rk_pos, bk_pos);
-        }
-
-        // At least one cache invalid — scan to verify/find
-        let mut found_rk = rk_pos;
-        let mut found_bk = bk_pos;
-        for y in 0..10 {
-            for x in 0..9 {
-                if let Some(p) = self.cells[y][x]
-                    && p.piece_type == PieceType::King {
-                        let coord = Coord::new(x as i8, y as i8);
-                        if p.color == Color::Red {
-                            found_rk = Some(coord);
-                            if found_bk.is_some() {
-                                self.king_pos.replace([found_rk, found_bk]);
-                                return (found_rk, found_bk);
-                            }
-                        } else {
-                            found_bk = Some(coord);
-                            if found_rk.is_some() {
-                                self.king_pos.replace([found_rk, found_bk]);
-                                return (found_rk, found_bk);
-                            }
-                        }
-                    }
-            }
-        }
-
-        // Update cache with whatever we found (including None if captured)
-        self.king_pos.replace([found_rk, found_bk]);
-        (found_rk, found_bk)
-    }
-
-    /// Invalidate king position cache
-    #[inline(always)]
-    pub fn invalidate_king_cache(&self) {
-        self.king_pos.replace([None, None]);
-    }
-
-    /// Update cached king positions after a move
-    #[inline(always)]
-    pub fn update_king_cache_on_move(&self, action: &Action) {
-        let src_piece = self.cells[action.src.y as usize][action.src.x as usize];
-        let captured_is_king = action.captured.is_some_and(|p| p.piece_type == PieceType::King);
-        let src_is_king = src_piece.is_some_and(|p| p.piece_type == PieceType::King);
-
-        if src_is_king || captured_is_king {
-            let mut cached = self.king_pos.borrow_mut();
-            if src_is_king {
-                let color = src_piece.unwrap().color;
-                match color {
-                    Color::Red => cached[0] = Some(action.tar),
-                    Color::Black => cached[1] = Some(action.tar),
-                }
-            }
-            if captured_is_king {
-                let enemy_color = action.captured.unwrap().color;
-                match enemy_color {
-                    Color::Red => cached[0] = None,
-                    Color::Black => cached[1] = None,
-                }
-            }
-        }
+        self.bitboards.find_kings()
     }
 
     /// Count pieces by type for each side
@@ -2112,13 +1898,11 @@ impl Board {
         let mut red = [0; 7];
         let mut black = [0; 7];
 
-        for row in &self.cells {
-            for &p in row {
-                if let Some(piece) = p {
-                    match piece.color {
-                        Color::Red => red[piece.piece_type as usize] += 1,
-                        Color::Black => black[piece.piece_type as usize] += 1,
-                    }
+        for sq in 0..90u8 {
+            if let Some(piece) = self.bitboards.piece_at(sq) {
+                match piece.color {
+                    Color::Red => red[piece.piece_type as usize] += 1,
+                    Color::Black => black[piece.piece_type as usize] += 1,
                 }
             }
         }
@@ -2155,7 +1939,7 @@ impl Board {
         let min_y = rk.y.min(bk.y);
         let max_y = rk.y.max(bk.y);
         for y in (min_y + 1)..max_y {
-            if self.cells[y as usize][rk.x as usize].is_some() {
+            if self.bitboards.piece_at_coord(Coord::new(rk.x, y)).is_some() {
                 return false;  // Something blocks the line of sight
             }
         }
@@ -2415,13 +2199,7 @@ impl Board {
     }
 
     pub fn flip_vertically(&mut self) {
-        for x in 0..9 {
-            for y in 0..5 {
-                let tmp = self.cells[y][x];
-                self.cells[y][x] = self.cells[9 - y][x];
-                self.cells[9 - y][x] = tmp;
-            }
-        }
+        self.bitboards.flip_vertically();
     }
 }
 
@@ -2437,7 +2215,7 @@ impl fmt::Display for Board {
         for y in 0..10 {
             write!(f, "{}|", y)?;
             for x in 0..9 {
-                let c = match self.cells[y][x] {
+                let c = match self.bitboards.piece_at_coord(Coord::new(x as i8, y as i8)) {
                     Some(p) => PIECE_CHARS[p.color as usize][p.piece_type as usize],
                     None => '·',
                 };
@@ -2460,6 +2238,7 @@ impl fmt::Display for Board {
 mod eval;
 mod nn_eval;
 mod nnue_input;
+mod bitboards;
 #[cfg(feature = "train")]
 mod nn_train;
 #[cfg(feature = "train")]
@@ -3846,7 +3625,7 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
                 let ndarray_bytes: Vec<u8> = match NNUEFeedForward::from_file_impl(bin_path) {
                     Ok(net) => {
                         eprintln!("已加载 inference 权重 from {}", bin_path);
-                        net.to_bytes().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+                        net.to_bytes().map_err(std::io::Error::other)?
                     }
                     Err(e) => {
                         eprintln!("加载 {} 失败: {}，无法转换", bin_path, e);
@@ -4020,13 +3799,12 @@ mod tests {
             cells[y as usize][x as usize] = Some(Piece { color, piece_type: pt });
         }
         Board {
-            cells,
+            bitboards: Bitboards::from_cells(&cells),
             zobrist_key: 0,
             current_side: Color::Red,
             rule_set: RuleSet::Official,
             move_history: vec![],
             repetition_history: Default::default(),
-            king_pos: RefCell::new([None, None]),
         }
     }
 
@@ -4545,21 +4323,21 @@ mod tests {
     #[test]
     fn test_make_and_undo_move() {
         let mut board = Board::new(RuleSet::Official, 1);
-        let initial_cells = board.cells;
+        let initial_cells = board.cells();
 
         // Make a move (Red pawn: (4,6) -> (4,5))
         let action = Action::new(Coord::new(4, 6), Coord::new(4, 5), None);
         board.make_move(action);
 
         // Verify piece moved
-        assert!(board.cells[6][4].is_none(), "Source should be empty after move");
-        assert!(board.cells[5][4].is_some(), "Target should have piece after move");
+        assert!(board.cells()[6][4].is_none(), "Source should be empty after move");
+        assert!(board.cells()[5][4].is_some(), "Target should have piece after move");
 
         // Undo the move
         board.undo_move(action);
 
         // Board should be restored
-        assert_eq!(board.cells, initial_cells, "Board should be restored after undo");
+        assert_eq!(board.cells(), initial_cells, "Board should be restored after undo");
     }
 
     #[test]
@@ -4572,13 +4350,13 @@ mod tests {
         let action = Action::new(Coord::new(4, 4), Coord::new(4, 5), Some(Piece { color: Color::Black, piece_type: PieceType::Pawn }));
         board.make_move(action);
 
-        assert!(board.cells[4][4].is_none(), "Source should be empty");
-        assert!(board.cells[5][4].is_some(), "Target should have chariot");
+        assert!(board.cells()[4][4].is_none(), "Source should be empty");
+        assert!(board.cells()[5][4].is_some(), "Target should have chariot");
 
         board.undo_move(action);
 
         // After undo, original positions should be restored
-        assert!(board.cells[5][4].is_some(), "Original pawn should be restored");
+        assert!(board.cells()[5][4].is_some(), "Original pawn should be restored");
     }
 
     // -------------------------------------------------------------------------
@@ -4595,7 +4373,7 @@ mod tests {
         board1.make_move(action);
 
         // board2 should be unchanged
-        assert!(board2.cells[6][4].is_some(), "Clone should be independent - source still has piece");
+        assert!(board2.cells()[6][4].is_some(), "Clone should be independent - source still has piece");
     }
 
     // -------------------------------------------------------------------------
@@ -4878,7 +4656,7 @@ mod tests {
             board_clone.undo_move(chosen);
 
             // Verify board is restored
-            assert_eq!(board.cells, board_clone.cells);
+            assert_eq!(board.cells(), board_clone.cells());
 
             // Actually make the move
             board.make_move(chosen);
@@ -4919,7 +4697,7 @@ mod tests {
             board_clone.undo_move(*action);
 
             // Verify board is restored
-            assert_eq!(board.cells, board_clone.cells);
+            assert_eq!(board.cells(), board_clone.cells());
         }
     }
 
@@ -6403,18 +6181,23 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_set_internal_place_piece() {
+    fn test_set_internal_zobrist_add_piece() {
+        // set_internal adds a piece to the Zobrist hash (used for captured pieces in SEE)
         let mut board = make_board(vec![]);
+        let key_before = board.zobrist_key;
         board.set_internal(Coord::new(4, 4), Some(Piece { color: Color::Red, piece_type: PieceType::Chariot }));
-        assert!(board.get(Coord::new(4, 4)).is_some(), "Piece should be placed");
-        assert_eq!(board.get(Coord::new(4, 4)).unwrap().piece_type, PieceType::Chariot);
+        let key_after = board.zobrist_key;
+        assert_ne!(key_before, key_after, "Zobrist key should change when piece is added");
     }
 
     #[test]
-    fn test_set_internal_remove_piece() {
+    fn test_set_internal_zobrist_remove_piece() {
+        // set_internal removes a piece from the Zobrist hash
         let mut board = make_board(vec![(4, 4, Color::Red, PieceType::Chariot)]);
+        let key_before = board.zobrist_key;
         board.set_internal(Coord::new(4, 4), None);
-        assert!(board.get(Coord::new(4, 4)).is_none(), "Piece should be removed");
+        let key_after = board.zobrist_key;
+        assert_ne!(key_before, key_after, "Zobrist key should change when piece is removed");
     }
 
     #[test]
@@ -7186,29 +6969,20 @@ mod tests {
     fn test_in_core_area_symmetric() {
         // Core area is x=3-5, y=3-6 for both colors (symmetric)
         let test_cases = vec![
-            (3, 3, Color::Red, true),
-            (4, 4, Color::Red, true),
-            (5, 5, Color::Red, true),
-            (3, 6, Color::Red, true),
-            (4, 6, Color::Red, true),
-            (5, 3, Color::Red, true),
-            (2, 4, Color::Red, false),  // x out of range
-            (4, 7, Color::Red, false),  // y > 6
-            (4, 2, Color::Red, false),  // y < 3
-            (3, 3, Color::Black, true),
-            (4, 4, Color::Black, true),
-            (5, 5, Color::Black, true),
-            (3, 6, Color::Black, true),
-            (4, 6, Color::Black, true),
-            (5, 3, Color::Black, true),
-            (2, 4, Color::Black, false), // x out of range
-            (4, 7, Color::Black, false), // y > 6
-            (4, 2, Color::Black, false), // y < 3
+            (3, 3, true),
+            (4, 4, true),
+            (5, 5, true),
+            (3, 6, true),
+            (4, 6, true),
+            (5, 3, true),
+            (2, 4, false),  // x out of range
+            (4, 7, false),  // y > 6
+            (4, 2, false),  // y < 3
         ];
-        for (x, y, color, expected) in test_cases {
+        for (x, y, expected) in test_cases {
             let coord = Coord::new(x, y);
-            assert_eq!(coord.in_core_area(color), expected,
-                "Coord({}, {}) in_core_area({:?}) should be {}", x, y, color, expected);
+            assert_eq!(coord.in_core_area(), expected,
+                "Coord({}, {}) in_core_area() should be {}", x, y, expected);
         }
     }
 
@@ -7511,13 +7285,13 @@ mod tests {
         let mut board = Board::new(RuleSet::Official, 1);
         let legal_moves = movegen::generate_legal_moves(&mut board, Color::Red);
         let action = legal_moves[0];
-        let original_cells = board.cells;
+        let original_cells = board.cells();
         let original_key = board.zobrist_key;
 
         board.make_move(action);
         board.undo_move(action);
 
-        assert_eq!(board.cells, original_cells, "Cells should be restored after undo");
+        assert_eq!(board.cells(), original_cells, "Cells should be restored after undo");
         assert_eq!(board.zobrist_key, original_key, "Zobrist key should be restored");
     }
 
@@ -7528,11 +7302,11 @@ mod tests {
         // Find a capture move if any
         let capture_move = legal_moves.into_iter().find(|m| m.captured.is_some());
         if let Some(action) = capture_move {
-            let original_cells = board.cells;
+            let original_cells = board.cells();
             board.make_move(action);
             assert!(action.captured.is_some(), "This should be a capture");
             board.undo_move(action);
-            assert_eq!(board.cells, original_cells, "Captured piece should be restored");
+            assert_eq!(board.cells(), original_cells, "Captured piece should be restored");
         }
     }
 

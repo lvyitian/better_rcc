@@ -7,7 +7,7 @@
 //!
 //! Each 630-feature block is organized as 7 piece types × 90 squares.
 
-use crate::{Board, PieceType};
+use crate::{Board, Coord};
 
 /// Input dimension: 1260 = 2 × 630 = 2 × (7 × 90)
 pub const INPUT_DIM: usize = 1260;
@@ -59,8 +59,7 @@ impl NNInputPlanes {
         // Encode each cell for stm (side-to-move perspective)
         for y in 0..10 {
             for x in 0..9 {
-                let cell = &board.cells[y][x];
-                if let Some(piece) = cell {
+                if let Some(piece) = board.get(Coord::new(x as i8, y as i8)) {
                     let base = if piece.color == our_color { 0 } else { 630 };
                     let piece_idx = piece.piece_type as usize;
                     let square_idx = y * 9 + x;
@@ -73,8 +72,7 @@ impl NNInputPlanes {
         // Encode each cell for ntm (not-side-to-move perspective, vertically flipped)
         for y in 0..10 {
             for x in 0..9 {
-                let cell = &board.cells[y][x];
-                if let Some(piece) = cell {
+                if let Some(piece) = board.get(Coord::new(x as i8, y as i8)) {
                     // For ntm, their pieces are at base 0, our pieces at base 630
                     // But the board is vertically flipped (y → 9 - y)
                     let base = if piece.color == their_color { 0 } else { 630 };
@@ -98,24 +96,15 @@ impl Default for NNInputPlanes {
 
 /// Count the total number of non-king pieces on the board.
 /// This is used to determine the bucket index for the NNUE value head.
+#[inline(always)]
 pub fn count_non_king_pieces(board: &Board) -> u8 {
-    let mut count = 0u8;
-    for y in 0..10 {
-        for x in 0..9 {
-            if let Some(ref piece) = board.cells[y][x]
-               && piece.piece_type != PieceType::King
-            {
-                count += 1;
-            }
-        }
-    }
-    count
+    board.bitboards.count_non_king_pieces()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Board, Color, Piece, PieceType, RuleSet};
+    use crate::{Board, PieceType, RuleSet};
 
     #[test]
     fn test_bucket_index() {
@@ -224,26 +213,10 @@ mod tests {
 
     #[test]
     fn test_vertical_flip() {
-        // Create a board with a single piece to verify vertical flip
-        let mut board = Board::new(RuleSet::Official, 1);
-
-        // Clear all pieces first (set to empty)
-        for y in 0..10 {
-            for x in 0..9 {
-                board.cells[y][x] = None;
-            }
-        }
-
-        // Place a Red Pawn at y=6 (near river)
-        board.cells[6][4] = Some(Piece {
-            color: Color::Red,
-            piece_type: PieceType::Pawn,
-        });
-        // Place a Black Horse at y=3
-        board.cells[3][1] = Some(Piece {
-            color: Color::Black,
-            piece_type: PieceType::Horse,
-        });
+        // Create a board with specific pieces using FEN to test vertical flip.
+        // Red Pawn at (4, 6), Black Horse at (1, 3)
+        // FEN: rank0/rank1/.../rank9, w = Red to move
+        let board = Board::from_fen("9/9/9/1h7/9/9/4P4/9/9/9 w - - 0 1");
 
         let (stm, ntm) = NNInputPlanes::from_board(&board);
 
