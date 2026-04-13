@@ -480,57 +480,68 @@ impl NNUEFeedForward {
         (stm_acc, ntm_acc)
     }
 
-    /// Forward pass returning raw f32 score.
-    /// `non_king_count` determines which bucket to use.
-    #[allow(dead_code)]
-    pub fn forward(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM], non_king_count: u8) -> f32 {
-        let (stm_acc, ntm_acc) = self.compute_accumulators(stm, ntm);
+    /// Internal helper: applies SCReLU and output layer to pre-computed accumulators.
+    /// `stm_acc` is the feature-transform accumulator for the side to move,
+    /// `ntm_acc` is for the opponent.
+    fn forward_from_accumulators(
+        &self,
+        stm_acc: &Accumulator,
+        ntm_acc: &Accumulator,
+        non_king_count: u8,
+    ) -> f32 {
+        let bucket_idx = bucket_index(non_king_count);
 
-        // Apply SCReLU: clamp(0, QA)² → i32
-        // Then split and concatenate: [stm_acc(1024), ntm_acc(1024)] = 2048
+        // SCReLU: clamp(x, 0, QA)² → i32, then concatenate [stm(1024), ntm(1024)]
         let mut combined = [0i32; FT_DIM * 2];
         for i in 0..FT_DIM {
             combined[i] = screlu(stm_acc.vals[i]);
             combined[FT_DIM + i] = screlu(ntm_acc.vals[i]);
         }
 
-        // Select bucket
-        let bucket_idx = bucket_index(non_king_count);
-
-        // Compute dot product: out_weights[bucket] · combined
-        // out_weights are QB quantized, combined is i32 (SCReLU result)
-        // combined[i] = screlu(acc[i]) where screlu returns [0, 65025] as i32
+        // Dot product with bucket's output weights
         let mut raw = 0i64;
         #[allow(clippy::needless_range_loop)]
         for i in 0..FT_DIM * 2 {
             raw += i64::from(self.out_weights[bucket_idx][i]) * i64::from(combined[i]);
         }
 
-        // Spec formula: output = ((Σ/QA) + bias) * SCALE / (QA*QB) then tanh * SCALE
-        // Σ/QA reduces quantization from QA²·QB → QA·QB
-        // Bias is stored in QA*QB units, so no conversion needed when adding
-        let raw_f = raw as f32;
-        let qb_f = QB as f32;
+        // Normalize and tanh
         let qa_f = QA as f32;
+        let qb_f = QB as f32;
         let scale_f = SCALE as f32;
-
-        // Divide by QA first (reduces QA²·QB → QA·QB), then add bias (QA*QB units)
-        // Then apply tanh * SCALE to get final output in [-400, 400]
-        let raw_result = ((raw_f / qa_f) + f32::from(self.out_bias[bucket_idx])) * scale_f / (qa_f * qb_f);
+        let raw_result = ((raw as f32 / qa_f) + f32::from(self.out_bias[bucket_idx])) * scale_f / (qa_f * qb_f);
         raw_result.tanh() * scale_f
     }
 
-    /// Forward pass returning NNOutput.
+    /// Forward pass returning raw f32 score.
+    /// `non_king_count` determines which bucket to use.
     #[allow(dead_code)]
-    pub fn forward_output(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM], non_king_count: u8) -> NNOutput {
-        let score = self.forward(stm, ntm, non_king_count);
-        // For NNUE, alpha=1.0, beta=0.0 (pure NN evaluation)
+    pub fn forward(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM], non_king_count: u8) -> f32 {
+        let (stm_acc, ntm_acc) = self.compute_accumulators(stm, ntm);
+        self.forward_from_accumulators(&stm_acc, &ntm_acc, non_king_count)
+    }
+
+    /// Forward pass from pre-computed accumulators, returning full NNOutput.
+    fn forward_output_from_accumulators(
+        &self,
+        stm_acc: &Accumulator,
+        ntm_acc: &Accumulator,
+        non_king_count: u8,
+    ) -> NNOutput {
+        let score = self.forward_from_accumulators(stm_acc, ntm_acc, non_king_count);
         NNOutput {
             alpha: 1.0,
             beta: 0.0,
             nn_score: score,
             correction: 0.0,
         }
+    }
+
+    /// Forward pass returning NNOutput.
+    #[allow(dead_code)]
+    pub fn forward_output(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM], non_king_count: u8) -> NNOutput {
+        let (stm_acc, ntm_acc) = self.compute_accumulators(stm, ntm);
+        self.forward_output_from_accumulators(&stm_acc, &ntm_acc, non_king_count)
     }
 }
 
