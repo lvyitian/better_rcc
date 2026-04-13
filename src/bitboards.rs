@@ -513,9 +513,29 @@ impl Bitboards {
         attacks
     }
 
-    /// King attacks from sq — 4 orthogonal destinations (palace-bound checked by caller).
-    pub fn king_attacks(&self, sq: u8) -> u128 {
-        get_king_attacks()[sq as usize]
+    /// King attacks from sq — 4 orthogonal destinations, palace-bound.
+    /// Filters out own-occupied destination squares.
+    pub fn king_attacks(&self, sq: u8, color: Color) -> u128 {
+        let x = (sq % 9) as i8;
+        let y = (sq / 9) as i8;
+        let occ_color = self.occupied(color);
+
+        let offsets = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+        let mut attacks = 0u128;
+        for (dx, dy) in offsets {
+            let tx = x + dx;
+            let ty = y + dy;
+            let target = Coord::new(tx, ty);
+            // Palace bounds check
+            if !target.is_valid() || !target.in_palace(color) {
+                continue;
+            }
+            let tsq = (ty * 9 + tx) as u8;
+            if occ_color & (1_u128 << tsq) == 0 {
+                attacks |= 1_u128 << tsq;
+            }
+        }
+        attacks
     }
 
     /// Pawn attacks from sq for the given color.
