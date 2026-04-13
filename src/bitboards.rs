@@ -6,7 +6,7 @@
 //! Bit index formula: `sq = y * 9 + x` where x=0-8, y=0-9
 
 #[allow(dead_code)]
-use crate::{Color, Piece, PieceType, Coord};
+use crate::{Action, Board, Color, Piece, PieceType, Coord};
 use smallvec::SmallVec;
 use std::sync::OnceLock;
 
@@ -716,6 +716,30 @@ impl Bitboards {
                 moves.push((from, dst, captured));
             }
             bb &= bb - 1; // Clear LSB
+        }
+        moves
+    }
+
+    /// Generate all pseudo-legal moves for a color, returning Action structs.
+    /// Iterates occupied squares via bitboards, calls generate_moves for destinations.
+    pub fn generate_pseudo_moves_bitboards(board: &Board, color: Color) -> SmallVec<[Action; 32]> {
+        let mut moves = SmallVec::new();
+        let bitboards = &board.bitboards;
+        let mut occ = bitboards.occupied(color);
+
+        while occ != 0 {
+            let from_sq = Self::lsb_index(occ);
+            let from_coord = coord_from_sq(from_sq);
+            // piece is guaranteed to exist since we're iterating occupied squares
+            let _piece = bitboards.piece_at(from_sq).unwrap();
+
+            for dst_sq in bitboards.generate_moves(from_sq, color) {
+                let tar_coord = coord_from_sq(dst_sq);
+                let captured = bitboards.piece_at(dst_sq); // None if empty, Some(enemy) if capture
+                moves.push(Action::new(from_coord, tar_coord, captured));
+            }
+
+            occ &= occ - 1; // clear LSB
         }
         moves
     }
