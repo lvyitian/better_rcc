@@ -5,6 +5,7 @@
 //!
 //! Bit index formula: `sq = y * 9 + x` where x=0-8, y=0-9
 
+#[allow(dead_code)]
 use crate::{Color, Piece, PieceType, Coord};
 use smallvec::SmallVec;
 use std::sync::OnceLock;
@@ -14,12 +15,14 @@ pub const BOARD_SQ_COUNT: usize = 90;
 
 /// Convert board Coord to bitboard square index (0-89)
 #[inline(always)]
+#[allow(dead_code)]
 pub fn sq_from_coord(x: i8, y: i8) -> u8 {
     (y * 9 + x) as u8
 }
 
 /// Convert bitboard square index (0-89) to Coord
 #[inline(always)]
+#[allow(dead_code)]
 pub fn coord_from_sq(sq: u8) -> Coord {
     Coord::new((sq % 9) as i8, (sq / 9) as i8)
 }
@@ -34,6 +37,7 @@ pub fn is_valid_sq(sq: u8) -> bool {
 /// dir: 0=North(+y), 1=South(-y), 2=East(+x), 3=West(-x)
 static CHARIOT_RAYS_STORAGE: OnceLock<[[u128; 4]; BOARD_SQ_COUNT]> = OnceLock::new();
 /// CANNON_SCREENS_STORAGE[sq][dir] = mask of squares between sq and first blocker (used for cannon captures)
+#[allow(dead_code)]
 static CANNON_SCREENS_STORAGE: OnceLock<[[u128; 4]; BOARD_SQ_COUNT]> = OnceLock::new();
 static HORSE_ATTACKS_STORAGE: OnceLock<[[u128; 8]; BOARD_SQ_COUNT]> = OnceLock::new();
 static ADVISOR_ATTACKS_STORAGE: OnceLock<[[u128; 4]; BOARD_SQ_COUNT]> = OnceLock::new();
@@ -193,6 +197,7 @@ pub fn get_chariot_rays() -> &'static [[u128; 4]; BOARD_SQ_COUNT] {
 }
 
 /// Get CANNON_SCREENS table (lazily initialized)
+#[allow(dead_code)]
 pub fn get_cannon_screens() -> &'static [[u128; 4]; BOARD_SQ_COUNT] {
     CANNON_SCREENS_STORAGE.get_or_init(|| init_chariot_rays().1)
 }
