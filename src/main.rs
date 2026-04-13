@@ -1339,31 +1339,7 @@ pub mod movegen {
     /// Use generate_legal_moves() for moves that are truly legal
     #[inline(always)]
     pub fn generate_pseudo_moves(board: &Board, color: Color) -> SmallVec<[Action; 32]> {
-        let mut moves = SmallVec::new();
-
-        for y in 0..10 {
-            for x in 0..9 {
-                let pos = Coord::new(x as i8, y as i8);
-                if let Some(piece) = board.get(pos)
-                    && piece.color == color {
-                        let targets = match piece.piece_type {
-                            PieceType::Pawn => generate_pawn_moves(board, pos, color),
-                            PieceType::Horse => generate_horse_moves(board, pos, color),
-                            PieceType::Chariot => generate_chariot_moves(board, pos, color),
-                            PieceType::Cannon => generate_cannon_moves(board, pos, color),
-                            PieceType::Elephant => generate_elephant_moves(board, pos, color),
-                            PieceType::Advisor => generate_advisor_moves(board, pos, color),
-                            PieceType::King => generate_king_moves(board, pos, color),
-                        };
-
-                        for tar in targets {
-                            moves.push(Action::new(pos, tar, board.get(tar)));
-                        }
-                    }
-            }
-        }
-
-        moves
+        Bitboards::generate_pseudo_moves_bitboards(board, color)
     }
 
     #[inline(always)]
@@ -2114,33 +2090,20 @@ impl Board {
     }
 
     fn is_capture_threat_internal(&self, attacker_color: Color) -> bool {
-        let opponent = attacker_color.opponent();
+        let bitboards = &self.bitboards;
+        let mut occ = bitboards.occupied(attacker_color);
 
-        for y in 0..10 {
-            for x in 0..9 {
-                let pos = Coord::new(x as i8, y as i8);
-                if let Some(piece) = self.get(pos)
-                    && piece.color == attacker_color {
-                        let targets = match piece.piece_type {
-                            PieceType::Pawn => movegen::generate_pawn_moves(self, pos, attacker_color),
-                            PieceType::Horse => movegen::generate_horse_moves(self, pos, attacker_color),
-                            PieceType::Chariot => movegen::generate_chariot_moves(self, pos, attacker_color),
-                            PieceType::Cannon => movegen::generate_cannon_moves(self, pos, attacker_color),
-                            PieceType::Elephant => movegen::generate_elephant_moves(self, pos, attacker_color),
-                            PieceType::Advisor => movegen::generate_advisor_moves(self, pos, attacker_color),
-                            PieceType::King => movegen::generate_king_moves(self, pos, attacker_color),
-                        };
-
-                        for tar in targets {
-                            if let Some(target_piece) = self.get(tar)
-                                && target_piece.color == opponent && target_piece.piece_type != PieceType::King {
-                                    return true;
-                                }
-                        }
+        while occ != 0 {
+            let from_sq = Bitboards::lsb_index(occ);
+            for dst_sq in bitboards.generate_moves(from_sq, attacker_color) {
+                if let Some(p) = bitboards.piece_at(dst_sq) {
+                    if p.color == attacker_color.opponent() && p.piece_type != PieceType::King {
+                        return true;
                     }
+                }
             }
+            occ &= occ - 1;
         }
-
         false
     }
 

@@ -385,13 +385,18 @@ impl Bitboards {
             let ray = rays[sq as usize][dir];
             let blockers = ray & occ;
             if blockers == 0 {
-                attacks |= ray;  // Clear path — all empty squares reachable
+                // No pieces in the way — all squares are empty, so the whole ray is quiet moves
+                attacks |= ray;
             } else {
                 let nearest = Self::lsb_index(blockers);
-                // Quiet moves: all empty squares before (not including) the screen
-                attacks |= ray & !(rays[nearest as usize][dir]);
+                // Quiet moves: all squares before (not including) the screen
+                // Must also exclude nearest itself since rays[nearest][dir] only has squares beyond nearest
+                attacks |= ray & !(rays[nearest as usize][dir] | (1_u128 << nearest));
 
-                let second_blockers = ray & occ & !(rays[nearest as usize][dir]);
+                // Capture: need exactly one screen and one target beyond it
+                // rays[nearest][dir] only has squares BEYOND nearest, not nearest itself
+                // So we must explicitly exclude nearest from the "beyond screen" check
+                let second_blockers = ray & occ & !(rays[nearest as usize][dir] | (1_u128 << nearest));
                 if second_blockers != 0 {
                     let second = Self::lsb_index(second_blockers);
                     // Capture only if target is NOT our own piece
