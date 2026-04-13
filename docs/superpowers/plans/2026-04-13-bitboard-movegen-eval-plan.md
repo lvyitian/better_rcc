@@ -34,7 +34,7 @@ Replace the existing `chariot_attacks` with:
 
 ```rust
 /// Chariot attacks from sq — all squares in 4 cardinal directions until first blocker.
-/// Filters out own-occupied destination squares.
+/// Returns all reachable squares (empty OR enemy-capturable). Friendly pieces block.
 pub fn chariot_attacks(&self, sq: u8, color: Color) -> u128 {
     let occ = self.occupied_all();
     let occ_color = self.occupied(color);
@@ -45,14 +45,15 @@ pub fn chariot_attacks(&self, sq: u8, color: Color) -> u128 {
         let ray = rays[sq as usize][dir];
         let blockers = ray & occ;
         if blockers == 0 {
-            attacks |= ray;
+            attacks |= ray;  // Clear path — all squares reachable
         } else {
             let nearest = Self::lsb_index(blockers);
-            // Only include if target square is not own-occupied
+            // Only include squares up to nearest if it is NOT our piece
             if occ_color & (1_u128 << nearest) == 0 {
                 let ray_to_nearest = ray & !(rays[nearest as usize][dir]);
-                attacks |= ray_to_nearest;
+                attacks |= ray_to_nearest;  // Includes nearest enemy square (capture)
             }
+            // If nearest is our own piece: no squares attacked in this direction
         }
     }
     attacks
@@ -85,8 +86,8 @@ Read `src/bitboards.rs:355-376`.
 - [ ] **Step 2: Replace with color-filtered version**
 
 ```rust
-/// Cannon attacks from sq — slides until first screen, then captures through it.
-/// Filters out own-occupied destination squares.
+/// Cannon attacks from sq — slides, returns empty squares and captures (enemy beyond 1 screen).
+/// Excludes own-occupied squares from both quiet and capture destinations.
 pub fn cannon_attacks(&self, sq: u8, color: Color) -> u128 {
     let occ = self.occupied_all();
     let occ_color = self.occupied(color);
@@ -97,16 +98,18 @@ pub fn cannon_attacks(&self, sq: u8, color: Color) -> u128 {
         let ray = rays[sq as usize][dir];
         let blockers = ray & occ;
         if blockers == 0 {
-            // No screen, no captures
+            attacks |= ray;  // Clear path — all empty squares reachable
         } else {
             let nearest = Self::lsb_index(blockers);
+            // Quiet moves: all empty squares before (not including) the screen
+            attacks |= ray & !(rays[nearest as usize][dir]);
+
             let second_blockers = ray & occ & !(rays[nearest as usize][dir]);
             if second_blockers != 0 {
                 let second = Self::lsb_index(second_blockers);
-                // Only include capture if target square is not own-occupied
+                // Capture only if target is NOT our own piece
                 if occ_color & (1_u128 << second) == 0 {
-                    let capture_ray = ray & !(rays[second as usize][dir]);
-                    attacks |= capture_ray;
+                    attacks |= 1_u128 << second;  // Capture = landing on target square
                 }
             }
         }
