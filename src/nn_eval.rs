@@ -842,4 +842,93 @@ mod tests {
             assert_eq!(a.vals, b.vals);
         }
     }
+
+    #[test]
+    fn test_incremental_make_undo_cycle() {
+        use crate::{Board, RuleSet, Action};
+        use crate::nnue_state::NnueState;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        use rand::Rng;
+
+        let mut board = Board::new(RuleSet::Official, 1);
+        // Fresh board starts with computed accumulators
+        board.nnue_state = NnueState::fresh(&board);
+        assert!(!board.nnue_state.dirty);
+
+        let mut rng: StdRng = SeedableRng::from_seed([42u8; 32]);
+
+        for _ in 0..30 {
+            let saved_state = board.nnue_state.clone();
+            let side = board.current_side;
+            let moves = crate::movegen::generate_legal_moves(&mut board, side);
+            if moves.is_empty() { break; }
+            let mv = moves[rng.gen_range(0..moves.len())].clone();
+
+            // Apply move using Board::make_move
+            let action = Action::new(mv.src, mv.tar, mv.captured);
+            board.make_move(action.clone());
+
+            // After make_move, dirty should be true
+            assert!(board.nnue_state.dirty, "dirty should be true after make_move");
+
+            // Evaluate to trigger recompute and cache
+            let side = board.current_side;
+            let _eval = crate::nn_eval::nn_evaluate_or_handcrafted(&mut board, side, false);
+            assert!(!board.nnue_state.dirty, "dirty should be false after evaluation");
+
+            // Undo move
+            board.undo_move(action.clone());
+
+            // After undo, state must match saved snapshot
+            assert!(!board.nnue_state.dirty, "dirty should be false after undo");
+            assert_eq!(board.nnue_state.red_acc.vals, saved_state.red_acc.vals,
+                       "red_acc vals must match after undo");
+            assert_eq!(board.nnue_state.black_acc.vals, saved_state.black_acc.vals,
+                       "black_acc vals must match after undo");
+            assert_eq!(board.nnue_state.non_king_count, saved_state.non_king_count,
+                       "non_king_count must match after undo");
+        }
+    }
+
+    #[test]
+    fn test_incremental_equals_recompute() {
+        use crate::{Board, RuleSet};
+        use crate::nnue_state::NnueState;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        use rand::Rng;
+
+        let mut board = Board::new(RuleSet::Official, 1);
+        board.nnue_state = NnueState::fresh(&board);
+        let mut rng: StdRng = SeedableRng::from_seed([42u8; 32]);
+
+        for _ in 0..30 {
+            // Evaluate at clean position (incremental path)
+            let side = board.current_side;
+            let eval_inc = crate::nn_eval::nn_evaluate_or_handcrafted(&mut board, side, false);
+
+            // Force recompute by marking dirty and clearing accumulators
+            board.nnue_state.dirty = true;
+            // Clear stored accumulators to force full recompute
+            let _nc = board.nnue_state.non_king_count;
+            board.nnue_state.red_acc = crate::nn_eval::Accumulator { vals: [0i16; crate::nnue_input::FT_DIM] };
+            board.nnue_state.black_acc = crate::nn_eval::Accumulator { vals: [0i16; crate::nnue_input::FT_DIM] };
+            let eval_rcp = crate::nn_eval::nn_evaluate_or_handcrafted(&mut board, side, false);
+
+            assert!((eval_inc - eval_rcp).abs() < 1,
+                    "mismatch: {} vs {}", eval_inc, eval_rcp);
+
+            // Make a random move
+            let side = board.current_side;
+            let moves = crate::movegen::generate_legal_moves(&mut board, side);
+            if moves.is_empty() { break; }
+            let mv = moves[rng.gen_range(0..moves.len())].clone();
+            let action = crate::Action::new(mv.src, mv.tar, mv.captured);
+            board.make_move(action.clone());
+
+            // Reset for next iteration
+            board.nnue_state = NnueState::fresh(&board);
+        }
+    }
 }
