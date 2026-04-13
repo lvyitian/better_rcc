@@ -358,7 +358,7 @@ impl Bitboards {
     }
 
     /// Cannon attacks from sq — slides until first screen, then captures through it.
-    pub fn cannon_attacks(&self, sq: u8) -> u128 {
+    pub fn cannon_attacks(&self, sq: u8, _color: Color) -> u128 {
         let occ = self.occupied_all();
         let rays = get_chariot_rays();
         let mut attacks = 0u128;
@@ -382,22 +382,22 @@ impl Bitboards {
     }
 
     /// Horse attacks from sq — 8 L-shape destinations (knee square unchecked by this function).
-    pub fn horse_attacks(&self, sq: u8) -> u128 {
+    pub fn horse_attacks(&self, sq: u8, _color: Color) -> u128 {
         get_horse_attacks()[sq as usize].iter().fold(0u128, |acc, &m| acc | m)
     }
 
     /// Advisor attacks from sq — 4 diagonal destinations (palace-bound checked by caller).
-    pub fn advisor_attacks(&self, sq: u8) -> u128 {
+    pub fn advisor_attacks(&self, sq: u8, _color: Color) -> u128 {
         get_advisor_attacks()[sq as usize].iter().fold(0u128, |acc, &m| acc | m)
     }
 
     /// Elephant attacks from sq — 4 diagonal destinations (river-bound checked by caller).
-    pub fn elephant_attacks(&self, sq: u8) -> u128 {
+    pub fn elephant_attacks(&self, sq: u8, _color: Color) -> u128 {
         get_elephant_attacks()[sq as usize].iter().fold(0u128, |acc, &m| acc | m)
     }
 
     /// King attacks from sq — 4 orthogonal destinations (palace-bound checked by caller).
-    pub fn king_attacks(&self, sq: u8) -> u128 {
+    pub fn king_attacks(&self, sq: u8, _color: Color) -> u128 {
         get_king_attacks()[sq as usize]
     }
 
@@ -466,7 +466,7 @@ impl Bitboards {
 
         // Horse attacks: 8 L-shape destinations around target
         // Horse at SRC attacks TAR: SRC = TAR - HORSE_DELTA
-        let horse_attacks_bb = self.horse_attacks(target);
+        let horse_attacks_bb = self.horse_attacks(target, color);
         let mut horse_bb = horse_attacks_bb & occ_color;
         while horse_bb != 0 {
             let sq = Self::lsb_index(horse_bb);
@@ -488,7 +488,7 @@ impl Bitboards {
         }
 
         // King attacks: 4 orthogonal moves
-        let king_attacks_bb = self.king_attacks(target);
+        let king_attacks_bb = self.king_attacks(target, color);
         let mut king_bb = king_attacks_bb & occ_color;
         while king_bb != 0 {
             let sq = Self::lsb_index(king_bb);
@@ -508,22 +508,22 @@ impl Bitboards {
         let mut destinations = SmallVec::new();
         let attacks = match () {
             _ if self.pieces[PieceType::Chariot as usize][color as usize] & (1_u128 << from) != 0 => {
-                self.chariot_attacks(from)
+                self.chariot_attacks(from, color)
             }
             _ if self.pieces[PieceType::Cannon as usize][color as usize] & (1_u128 << from) != 0 => {
-                self.cannon_attacks(from)
+                self.cannon_attacks(from, color)
             }
             _ if self.pieces[PieceType::Horse as usize][color as usize] & (1_u128 << from) != 0 => {
-                self.horse_attacks(from)
+                self.horse_attacks(from, color)
             }
             _ if self.pieces[PieceType::Advisor as usize][color as usize] & (1_u128 << from) != 0 => {
-                self.advisor_attacks(from)
+                self.advisor_attacks(from, color)
             }
             _ if self.pieces[PieceType::Elephant as usize][color as usize] & (1_u128 << from) != 0 => {
-                self.elephant_attacks(from)
+                self.elephant_attacks(from, color)
             }
             _ if self.pieces[PieceType::King as usize][color as usize] & (1_u128 << from) != 0 => {
-                self.king_attacks(from)
+                self.king_attacks(from, color)
             }
             _ if self.pieces[PieceType::Pawn as usize][color as usize] & (1_u128 << from) != 0 => {
                 self.pawn_attacks(from, color)
