@@ -611,7 +611,7 @@ impl Bitboards {
 
         // Horse attacks: 8 L-shape destinations around target
         // Horse at SRC attacks TAR: SRC = TAR - HORSE_DELTA
-        let horse_attacks_bb = self.horse_attacks(target);
+        let horse_attacks_bb = self.horse_attacks(target, color);
         let mut horse_bb = horse_attacks_bb & occ_color;
         while horse_bb != 0 {
             let sq = Self::lsb_index(horse_bb);
@@ -633,7 +633,7 @@ impl Bitboards {
         }
 
         // King attacks: 4 orthogonal moves
-        let king_attacks_bb = self.king_attacks(target);
+        let king_attacks_bb = self.king_attacks(target, color);
         let mut king_bb = king_attacks_bb & occ_color;
         while king_bb != 0 {
             let sq = Self::lsb_index(king_bb);
@@ -656,19 +656,19 @@ impl Bitboards {
                 self.chariot_attacks(from, color)
             }
             _ if self.pieces[PieceType::Cannon as usize][color as usize] & (1_u128 << from) != 0 => {
-                self.cannon_attacks(from)
+                self.cannon_attacks(from, color)
             }
             _ if self.pieces[PieceType::Horse as usize][color as usize] & (1_u128 << from) != 0 => {
-                self.horse_attacks(from)
+                self.horse_attacks(from, color)
             }
             _ if self.pieces[PieceType::Advisor as usize][color as usize] & (1_u128 << from) != 0 => {
-                self.advisor_attacks(from)
+                self.advisor_attacks(from, color)
             }
             _ if self.pieces[PieceType::Elephant as usize][color as usize] & (1_u128 << from) != 0 => {
-                self.elephant_attacks(from)
+                self.elephant_attacks(from, color)
             }
             _ if self.pieces[PieceType::King as usize][color as usize] & (1_u128 << from) != 0 => {
-                self.king_attacks(from)
+                self.king_attacks(from, color)
             }
             _ if self.pieces[PieceType::Pawn as usize][color as usize] & (1_u128 << from) != 0 => {
                 self.pawn_attacks(from, color)
