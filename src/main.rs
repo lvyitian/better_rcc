@@ -9,6 +9,7 @@
 //! - Endgame tablebase for simplified positions
 
 use crate::bitboards::Bitboards;
+use crate::nnue_state::NnueState;
 
 use std::fmt;
 use std::io;
@@ -358,13 +359,14 @@ impl Coord {
 // =============================================================================
 
 /// Represents a chess move with full context for search and evaluation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Action {
     pub src: Coord,                  // Source square
     pub tar: Coord,                  // Target square
     pub captured: Option<Piece>,      // Piece captured (if any)
     pub is_check: bool,              // Does this move give check?
     pub is_capture_threat: bool,     // Does this move threaten capture? (for repetition)
+    pub nnue_snapshot: Option<crate::nnue_state::NnueSnapshot>,
 }
 
 impl Action {
@@ -376,6 +378,7 @@ impl Action {
             captured,
             is_check: false,
             is_capture_threat: false,
+            nnue_snapshot: None,
         }
     }
 
@@ -495,7 +498,7 @@ pub enum TTEntryType {
 /// - Exact scores work normally
 /// - Lower bounds (beta cutoffs) can only be used if beta >= stored value
 /// - Upper bounds (alpha cutoffs) can only be used if alpha <= stored value
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TTEntry {
     pub key: u64,           // Position hash (Zobrist key) for verification
     pub depth: u8,          // Search depth this entry represents (higher = more trusted)
@@ -661,11 +664,11 @@ pub mod book {
                 return;
             }
             if actions.len() == 1 {
-                self.book.insert(key, actions[0]);
+                self.book.insert(key, actions[0].clone());
                 return;
             }
             // First action is primary, rest are alternatives
-            self.book.insert(key, actions[0]);
+            self.book.insert(key, actions[0].clone());
             if actions.len() > 1 {
                 self.alternatives.insert(key, actions[1..].to_vec());
             }
@@ -679,20 +682,20 @@ pub mod book {
             board.make_move(a1);
             // 黑方马8进7 (ply 2)
             let a2 = Action::new(Coord::new(7, 0), Coord::new(6, 2), None);
-            self.book.insert(board.zobrist_key, a2);
+            self.book.insert(board.zobrist_key, a2.clone());
             board.make_move(a2);
             // 红方马八进七 (ply 3)
             let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-            self.book.insert(board.zobrist_key, a3);
+            self.book.insert(board.zobrist_key, a3.clone());
             board.make_move(a3);
             // 黑方马2进3 (ply 4)
             let a4 = Action::new(Coord::new(1, 0), Coord::new(2, 2), None);
-            self.insert(board.zobrist_key, &[a4]);
+            self.insert(board.zobrist_key, &[a4.clone()]);
             board.make_move(a4);
             // Branch: 红方车九平八 (main) or 兵五进一 (ply 5)
             let a5_main = Action::new(Coord::new(0, 9), Coord::new(0, 8), None);
             let a5_wuqi = Action::new(Coord::new(4, 6), Coord::new(4, 5), None);
-            self.insert(board.zobrist_key, &[a5_main, a5_wuqi]);
+            self.insert(board.zobrist_key, &[a5_main.clone(), a5_wuqi.clone()]);
 
             let mut board_main = board.clone();
             board_main.make_move(a5_main);
@@ -708,15 +711,15 @@ pub mod book {
             board.make_move(a1);
             // 黑方炮8平5 (ply 2)
             let a2 = Action::new(Coord::new(7, 0), Coord::new(4, 0), None);
-            self.book.insert(board.zobrist_key, a2);
+            self.book.insert(board.zobrist_key, a2.clone());
             board.make_move(a2);
             // 红方马八进七 (ply 3)
             let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-            self.book.insert(board.zobrist_key, a3);
+            self.book.insert(board.zobrist_key, a3.clone());
             board.make_move(a3);
             // 黑方车1进1 (ply 4)
             let a4 = Action::new(Coord::new(8, 0), Coord::new(8, 1), None);
-            self.book.insert(board.zobrist_key, a4);
+            self.book.insert(board.zobrist_key, a4.clone());
             board.make_move(a4);
             // 红方车九平八 (ply 5)
             let a5 = Action::new(Coord::new(0, 9), Coord::new(0, 8), None);
@@ -748,11 +751,11 @@ pub mod book {
             board.make_move(a1);
             // 黑方炮8平5 (ply 2)
             let a2 = Action::new(Coord::new(7, 0), Coord::new(4, 0), None);
-            self.book.insert(board.zobrist_key, a2);
+            self.book.insert(board.zobrist_key, a2.clone());
             board.make_move(a2);
             // 红方马八进七 (ply 3)
             let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-            self.book.insert(board.zobrist_key, a3);
+            self.book.insert(board.zobrist_key, a3.clone());
         }
 
         fn build_qi_ma_line(&mut self) {
@@ -762,11 +765,11 @@ pub mod book {
             board.make_move(a1);
             // 黑方卒7进1 (ply 2)
             let a2 = Action::new(Coord::new(6, 3), Coord::new(6, 4), None);
-            self.book.insert(board.zobrist_key, a2);
+            self.book.insert(board.zobrist_key, a2.clone());
             board.make_move(a2);
             // 红方兵三进一 (ply 3)
             let a3 = Action::new(Coord::new(6, 6), Coord::new(6, 5), None);
-            self.book.insert(board.zobrist_key, a3);
+            self.book.insert(board.zobrist_key, a3.clone());
         }
 
         fn build_guo_gong_pao_line(&mut self) {
@@ -776,11 +779,11 @@ pub mod book {
             board.make_move(a1);
             // 黑方马8进7 (ply 2)
             let a2 = Action::new(Coord::new(7, 0), Coord::new(6, 2), None);
-            self.book.insert(board.zobrist_key, a2);
+            self.book.insert(board.zobrist_key, a2.clone());
             board.make_move(a2);
             // 红方马八进七 (ply 3)
             let a3 = Action::new(Coord::new(1, 9), Coord::new(2, 7), None);
-            self.book.insert(board.zobrist_key, a3);
+            self.book.insert(board.zobrist_key, a3.clone());
         }
 
         fn build_xian_ren_zhi_lu_line(&mut self) {
@@ -790,18 +793,18 @@ pub mod book {
             board.make_move(a1);
             // 黑方卒7进1 (ply 2)
             let a2 = Action::new(Coord::new(6, 3), Coord::new(6, 4), None);
-            self.book.insert(board.zobrist_key, a2);
+            self.book.insert(board.zobrist_key, a2.clone());
             board.make_move(a2);
             // 红方炮八平五 (ply 3)
             let a3 = Action::new(Coord::new(1, 7), Coord::new(4, 7), None);
-            self.book.insert(board.zobrist_key, a3);
+            self.book.insert(board.zobrist_key, a3.clone());
         }
 
         /// Look up the best move for the current position
         /// Returns None if position is not in book
         pub fn probe(&self, board: &mut Board) -> Option<Action> {
             let key = board.zobrist_key;
-            let primary = *self.book.get(&key)?;
+            let primary = self.book.get(&key)?.clone();
 
             // Check if primary move is still legal (source has our piece, target is empty or has enemy)
             let primary_legal = board.get(primary.src).is_some()
@@ -810,10 +813,10 @@ pub mod book {
 
             // Gather all valid moves (primary + alternatives)
             let mut candidates: Vec<Action> = Vec::new();
-            candidates.push(primary);
+            candidates.push(primary.clone());
 
             if let Some(alts) = self.alternatives.get(&key) {
-                candidates.extend(alts.iter().copied());
+                candidates.extend(alts.iter().cloned());
             }
 
             // Filter to only legal moves (occupancy check first)
@@ -828,7 +831,7 @@ pub mod book {
             // Now check self-check legality (requires mutable borrow, done separately)
             let valid_moves: Vec<Action> = occupancy_ok.into_iter()
                 .filter(|a| {
-                    let (legal, _) = movegen::is_legal_move(board, *a, board.current_side);
+                    let (legal, _) = movegen::is_legal_move(board, a.clone(), board.current_side);
                     legal
                 })
                 .collect();
@@ -847,7 +850,7 @@ pub mod book {
                         return Some(primary);
                     }
                     let idx = seed % alts.len();
-                    return Some(alts[idx]);
+                    return Some(alts[idx].clone());
                 }
                 return Some(primary);
             }
@@ -857,7 +860,7 @@ pub mod book {
                 && !alts.is_empty() {
                 let seed = (key & 0xFFFF) as usize + (board.move_history.len() % 2) * 0x8000;
                 let idx = seed % alts.len();
-                return Some(alts[idx]);
+                return Some(alts[idx].clone());
             }
 
             None
@@ -1373,11 +1376,12 @@ pub mod movegen {
         let mut legal_moves = SmallVec::new();
         let pseudo_moves = generate_pseudo_moves(board, color);
 
-        for mut action in pseudo_moves {
-            let (legal, gives_check) = is_legal_move(board, action, color);
+        for action in pseudo_moves {
+            let (legal, gives_check) = is_legal_move(board, action.clone(), color);
             if legal {
-                action.is_check = gives_check;
-                legal_moves.push(action);
+                let mut a = action;
+                a.is_check = gives_check;
+                legal_moves.push(a);
             }
         }
 
@@ -1390,11 +1394,12 @@ pub mod movegen {
         moves.retain(|a| a.captured.is_some());
 
         let mut legal_captures = SmallVec::new();
-        for mut action in moves {
-            let (legal, gives_check) = is_legal_move(board, action, color);
+        for action in moves {
+            let (legal, gives_check) = is_legal_move(board, action.clone(), color);
             if legal {
-                action.is_check = gives_check;
-                legal_captures.push(action);
+                let mut a = action;
+                a.is_check = gives_check;
+                legal_captures.push(a);
             }
         }
 
@@ -1562,6 +1567,7 @@ pub struct Board {
     pub rule_set: RuleSet,                 // Game rules (affects repetition detection)
     pub move_history: Vec<Action>,          // Move stack for undo/display
     pub repetition_history: HashMap<u64, u8>, // Position count for repetition
+    pub nnue_state: NnueState,
 }
 
 impl Board {
@@ -1633,14 +1639,17 @@ impl Board {
         let mut repetition_history = HashMap::new();
         repetition_history.insert(zobrist_key, 1);
 
-        Board {
+        let mut board = Board {
             bitboards: Bitboards::from_cells(&cells),
             zobrist_key,
             current_side: match order { 1 => Color::Red, 2 => Color::Black, _=>unreachable!() },
             rule_set,
             move_history: Vec::with_capacity(200),
             repetition_history,
-        }
+            nnue_state: NnueState::zero(),
+        };
+        board.nnue_state = NnueState::fresh(&board);
+        board
     }
 
     /// Parse a Xiangqi FEN string and create a Board.
@@ -1730,14 +1739,17 @@ impl Board {
         let mut repetition_history = HashMap::new();
         repetition_history.insert(zobrist_key, 1);
 
-        Board {
+        let mut board = Board {
             bitboards: Bitboards::from_cells(&cells),
             zobrist_key,
             current_side,
             rule_set: RuleSet::Official,
             move_history: Vec::with_capacity(200),
             repetition_history,
-        }
+            nnue_state: NnueState::zero(),
+        };
+        board.nnue_state = NnueState::fresh(&board);
+        board
     }
     #[inline(always)]
     pub fn get(&self, coord: Coord) -> Option<Piece> {
@@ -1794,9 +1806,22 @@ impl Board {
             return;
         };
 
-        // Update bitboards BEFORE moving pieces
+        // Save NNUE snapshot for undo (before making the move)
+        action.nnue_snapshot = Some(crate::nnue_state::NnueSnapshot::from_board(self));
+
+        // Apply the incremental NNUE update (includes cache insertion and sets dirty=true)
         let src_sq = (action.src.y * 9 + action.src.x) as u8;
         let dst_sq = (action.tar.y * 9 + action.tar.x) as u8;
+        self.nnue_state.apply_move(
+            src_sq,
+            dst_sq,
+            piece,
+            action.captured,
+            &crate::nn_eval::NN_NET,
+            self.zobrist_key,
+        );
+
+        // Update bitboards BEFORE moving pieces
         self.bitboards.apply_move(src_sq, dst_sq, action.captured, piece);
 
         // Move piece to target, clear source
@@ -1832,6 +1857,16 @@ impl Board {
     /// The move must have been made with make_move() - we assume the history
     /// is consistent. The action's captured field holds what was taken.
     pub fn undo_move(&mut self, action: Action) {
+        // Restore NNUE state from snapshot
+        if let Some(snap) = action.nnue_snapshot {
+            self.nnue_state.red_acc = snap.red_acc;
+            self.nnue_state.black_acc = snap.black_acc;
+            self.nnue_state.non_king_count = snap.non_king_count;
+            self.nnue_state.dirty = false;
+            // Remove the pre-move position from cache (it will be re-inserted if reached again)
+            crate::nnue_state::nnue_cache_remove(&self.zobrist_key);
+        }
+
         // Decrement or remove repetition count
         if let Some(count) = self.repetition_history.get_mut(&self.zobrist_key) {
             *count -= 1;
@@ -2201,6 +2236,7 @@ impl fmt::Display for Board {
 mod eval;
 mod nn_eval;
 mod nnue_input;
+mod nnue_state;
 mod bitboards;
 #[cfg(feature = "train")]
 mod nn_train;
@@ -2265,7 +2301,7 @@ pub mod search {
         #[inline(always)]
         pub fn probe(&self, key: u64) -> Option<TTEntry> {
             if let Ok(tt) = self.tt.read() {
-                tt.probe(key).copied()
+                tt.probe(key).cloned()
             } else {
                 None
             }
@@ -2320,8 +2356,8 @@ pub mod search {
         pub fn new() -> Self {
             ThreadContext {
                 history_table: [[0; 90]; 90],
-                killer_moves: [[None; 2]; (MAX_DEPTH + 4) as usize],
-                counter_moves: [[None; 90]; 90],
+                killer_moves: std::array::from_fn(|_| [const { None }; 2]),
+                counter_moves: std::array::from_fn(|_| std::array::from_fn(|_| None)),
                 last_move_aggressive: false,
             }
         }
@@ -2347,8 +2383,8 @@ pub mod search {
             if depth_idx >= self.killer_moves.len() {
                 return;
             }
-            if self.killer_moves[depth_idx][0] != Some(action) {
-                self.killer_moves[depth_idx][1] = self.killer_moves[depth_idx][0];
+            if self.killer_moves[depth_idx][0] != Some(action.clone()) {
+                self.killer_moves[depth_idx][1] = self.killer_moves[depth_idx][0].clone();
                 self.killer_moves[depth_idx][0] = Some(action);
             }
         }
@@ -2382,8 +2418,8 @@ pub mod search {
             let zobrist = get_zobrist();
 
             moves.sort_by(|a, b| {
-                let a_is_tt = tt_move == Some(*a);
-                let b_is_tt = tt_move == Some(*b);
+                let a_is_tt = tt_move == Some(a.clone());
+                let b_is_tt = tt_move == Some(b.clone());
                 if a_is_tt != b_is_tt {
                     return b_is_tt.cmp(&a_is_tt);
                 }
@@ -2398,28 +2434,30 @@ pub mod search {
                     return b.is_check.cmp(&a.is_check);
                 }
 
-                let a_mvv = a.mvv_lva_score();
-                let b_mvv = b.mvv_lva_score();
+                let a_mvv = a.clone().mvv_lva_score();
+                let b_mvv = b.clone().mvv_lva_score();
                 if a_mvv != b_mvv {
                     return b_mvv.cmp(&a_mvv);
                 }
 
-                let a_is_counter = prev_action.is_some_and(|pa| {
+                // Check counter move match - only evaluate if prev_action is Some
+                let prev = prev_action.as_ref();
+                let a_is_counter = prev.and_then(|pa| {
                     let prev_from = zobrist.pos_idx(pa.src);
                     let prev_to = zobrist.pos_idx(pa.tar);
-                    self.counter_moves[prev_from][prev_to] == Some(*a)
-                });
-                let b_is_counter = prev_action.is_some_and(|pa| {
+                    Some(self.counter_moves[prev_from][prev_to] == Some(a.clone()))
+                }).unwrap_or(false);
+                let b_is_counter = prev.and_then(|pa| {
                     let prev_from = zobrist.pos_idx(pa.src);
                     let prev_to = zobrist.pos_idx(pa.tar);
-                    self.counter_moves[prev_from][prev_to] == Some(*b)
-                });
+                    Some(self.counter_moves[prev_from][prev_to] == Some(b.clone()))
+                }).unwrap_or(false);
                 if a_is_counter != b_is_counter {
                     return b_is_counter.cmp(&a_is_counter);
                 }
 
-                let a_is_killer = depth_idx < self.killer_moves.len() && self.killer_moves[depth_idx].contains(&Some(*a));
-                let b_is_killer = depth_idx < self.killer_moves.len() && self.killer_moves[depth_idx].contains(&Some(*b));
+                let a_is_killer = depth_idx < self.killer_moves.len() && self.killer_moves[depth_idx].contains(&Some(a.clone()));
+                let b_is_killer = depth_idx < self.killer_moves.len() && self.killer_moves[depth_idx].contains(&Some(b.clone()));
                 if a_is_killer != b_is_killer {
                     return b_is_killer.cmp(&a_is_killer);
                 }
@@ -2506,15 +2544,13 @@ pub mod search {
                 }
             }
 
-            board.make_move(action);
-            let was_aggressive = action.captured.is_some();
-            thread_ctx.last_move_aggressive = was_aggressive;
+            board.make_move(action.clone());
 
             let eval = -quiescence(
                 board, thread_ctx, shared_tt, -beta, -alpha,
                 side.opponent(), depth + 1, time_ctx
             );
-            board.undo_move(action);
+            board.undo_move(action.clone());
 
             if time_ctx.is_time_up() {
                 return alpha;
@@ -2624,7 +2660,7 @@ pub mod search {
             let mut dummy_best = None;
             zw_search(
                 board, thread_ctx, shared_tt, depth - 2, beta,
-                side, false, &mut dummy_best, time_ctx, extension_count, prev_action
+                side, false, &mut dummy_best, time_ctx, extension_count, prev_action.clone()
             );
             shared_tt.probe(key).and_then(|e| e.best_move)
         } else {
@@ -2665,7 +2701,8 @@ pub mod search {
             }
         }
 
-        thread_ctx.sort_moves(&mut moves, tt_move, prev_action, depth, board);
+        let prev_action_for_sort = prev_action.clone();
+        thread_ctx.sort_moves(&mut moves, tt_move, prev_action_for_sort, depth, board);
 
         let mut best_eval = -i32::MAX;
         let mut current_best_move = None;
@@ -2690,7 +2727,7 @@ pub mod search {
             }
             let new_depth = depth - 1 + extension;
 
-            board.make_move(*action);
+            board.make_move(action.clone());
 
             // Track initiative: aggressive if capture or check
             let was_aggressive = action.captured.is_some() || action.is_check;
@@ -2710,7 +2747,7 @@ pub mod search {
 
             let mut eval;
             if skip_move {
-                board.undo_move(*action);
+                board.undo_move(action.clone());
                 continue;
             } else if has_pv && !pv_node && !is_in_check && !gives_check && action.captured.is_none() && move_idx >= LMR_MIN_MOVES && depth >= 3 {
                 // Enhanced LMR: reduce more in midgame, less in endgame
@@ -2718,22 +2755,22 @@ pub mod search {
                 let reduced_depth = depth - 1 - lmr_reduction;
                 eval = -zw_search(
                     board, thread_ctx, shared_tt, reduced_depth, -alpha,
-                    side.opponent(), false, &mut None, time_ctx, new_extension_count, Some(*action)
+                    side.opponent(), false, &mut None, time_ctx, new_extension_count, Some(action.clone())
                 );
                 if eval > alpha && !time_ctx.is_time_up() {
                     eval = -zw_search(
                         board, thread_ctx, shared_tt, new_depth, -alpha,
-                        side.opponent(), true, &mut None, time_ctx, new_extension_count, Some(*action)
+                        side.opponent(), true, &mut None, time_ctx, new_extension_count, Some(action.clone())
                     );
                 }
             } else {
                 eval = -zw_search(
                     board, thread_ctx, shared_tt, new_depth, -alpha,
-                    side.opponent(), !has_pv && pv_node, &mut None, time_ctx, new_extension_count, Some(*action)
+                    side.opponent(), !has_pv && pv_node, &mut None, time_ctx, new_extension_count, Some(action.clone())
                 );
             }
 
-            board.undo_move(*action);
+            board.undo_move(action.clone());
 
             if time_ctx.is_time_up() {
                 return best_eval.max(alpha);
@@ -2741,16 +2778,16 @@ pub mod search {
 
             if eval > best_eval {
                 best_eval = eval;
-                current_best_move = Some(*action);
-                *best_action = Some(*action);
+                current_best_move = Some(action.clone());
+                *best_action = Some(action.clone());
             }
 
             if eval >= beta {
                 if action.captured.is_none() {
-                    thread_ctx.update_killer(*action, depth);
-                    thread_ctx.update_history(*action, depth);
-                    if let Some(pa) = prev_action {
-                        thread_ctx.update_counter(pa, *action);
+                    thread_ctx.update_killer(action.clone(), depth);
+                    thread_ctx.update_history(action.clone(), depth);
+                    if let Some(pa) = prev_action.clone() {
+                        thread_ctx.update_counter(pa, action.clone());
                     }
                 }
                 break;
@@ -2999,7 +3036,7 @@ pub mod search {
 
         let mut best_depth = 0;
         let mut best_score = -MATE_SCORE;
-        let mut final_best_action = legal_moves.first().copied();
+        let mut final_best_action = legal_moves.first().cloned();
 
         while !time_ctx.is_time_up() {
             match result_receiver.recv_timeout(Duration::from_millis(100)) {
@@ -3624,7 +3661,7 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
 
 /// Main evaluation entry point. Currently dispatches to handcrafted evaluation.
 /// In the future, this will route to the neural network when available.
-pub fn evaluate(board: &Board, side: Color, initiative: bool) -> i32 {
+pub fn evaluate(board: &mut Board, side: Color, initiative: bool) -> i32 {
     nn_eval::nn_evaluate_or_handcrafted(board, side, initiative)
 }
 
@@ -4590,9 +4627,9 @@ mod tests {
 
     #[test]
     fn fuzz_evaluate_no_panic_initial_position() {
-        let board = Board::new(RuleSet::Official, 1);
-        let _ = crate::evaluate(&board, Color::Red, false);
-        let _ = crate::evaluate(&board, Color::Black, false);
+        let mut board = Board::new(RuleSet::Official, 1);
+        let _ = crate::evaluate(&mut board, Color::Red, false);
+        let _ = crate::evaluate(&mut board, Color::Black, false);
     }
 
     #[test]
@@ -4625,7 +4662,7 @@ mod tests {
             board.make_move(chosen);
 
             // Evaluate position - should not panic
-            let _ = crate::evaluate(&board, side, false);
+            let _ = crate::evaluate(&mut board, side, false);
         }
     }
 
@@ -7101,9 +7138,9 @@ mod tests {
     #[test]
     #[ignore]
     fn test_eval_returns_reasonable_values() {
-        let board = Board::new(RuleSet::Official, 1);
-        let red_eval = crate::evaluate(&board, Color::Red, false);
-        let black_eval = crate::evaluate(&board, Color::Black, false);
+        let mut board = Board::new(RuleSet::Official, 1);
+        let red_eval = crate::evaluate(&mut board, Color::Red, false);
+        let black_eval = crate::evaluate(&mut board, Color::Black, false);
         // Red evaluates positive, Black evaluates negative (proper sign convention)
         assert!(red_eval > 0, "Red should have positive evaluation: {}", red_eval);
         assert!(black_eval < 0, "Black should have negative evaluation: {}", black_eval);
@@ -7118,21 +7155,21 @@ mod tests {
     fn test_eval_symmetry_red_black() {
         let mut board = Board::new(RuleSet::Official, 1);
         board.current_side = Color::Red;
-        let red_eval = crate::evaluate(&board, Color::Red, false);
-        let black_eval = crate::evaluate(&board, Color::Black, false);
+        let red_eval = crate::evaluate(&mut board, Color::Red, false);
+        let black_eval = crate::evaluate(&mut board, Color::Black, false);
         assert_eq!(red_eval, -black_eval,
             " evaluations should be negated: Red={}, Black={}", red_eval, black_eval);
     }
 
     #[test]
     fn test_mate_score_detection() {
-        let board = make_board(vec![
+        let mut board = make_board(vec![
             (4, 9, Color::Red, PieceType::King),
             (4, 0, Color::Black, PieceType::King),
             (4, 1, Color::Red, PieceType::Chariot), // Red chariot checking Black king
         ]);
         // Black is in check, verify evaluation doesn't panic
-        let _ = crate::evaluate(&board, Color::Black, false);
+        let _ = crate::evaluate(&mut board, Color::Black, false);
     }
 
     // -------------------------------------------------------------------------
@@ -7303,19 +7340,19 @@ mod tests {
     #[test]
     fn test_pst_val_returns_positive_for_good_squares() {
         // Test that chariot evaluates higher than horse (both with kings present)
-        let board_chariot = make_board(vec![
+        let mut board_chariot = make_board(vec![
             (4, 9, Color::Red, PieceType::King),
             (4, 4, Color::Red, PieceType::Chariot),
             (4, 0, Color::Black, PieceType::King),
         ]);
-        let chariot_eval = crate::evaluate(&board_chariot, Color::Red, false);
+        let chariot_eval = crate::evaluate(&mut board_chariot, Color::Red, false);
 
-        let board_horse = make_board(vec![
+        let mut board_horse = make_board(vec![
             (4, 9, Color::Red, PieceType::King),
             (4, 4, Color::Red, PieceType::Horse),
             (4, 0, Color::Black, PieceType::King),
         ]);
-        let horse_eval = crate::evaluate(&board_horse, Color::Red, false);
+        let horse_eval = crate::evaluate(&mut board_horse, Color::Red, false);
 
         // Chariot (650) + PST should be > Horse (350) + PST
         assert!(chariot_eval > horse_eval,
@@ -7373,7 +7410,7 @@ mod tests {
             assert!(rk.is_some() || bk.is_some(), "At least one king must remain");
 
             // Evaluate should not panic
-            let _ = crate::evaluate(&board, side, false);
+            let _ = crate::evaluate(&mut board, side, false);
         }
     }
 
