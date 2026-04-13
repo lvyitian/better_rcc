@@ -245,6 +245,12 @@ impl Bitboards {
         self.occupied(Color::Red) | self.occupied(Color::Black)
     }
 
+    /// Get the bitboard for a specific piece type and color.
+    #[inline(always)]
+    pub fn piece_bitboard(&self, piece_type: PieceType, color: Color) -> u128 {
+        self.pieces[piece_type as usize][color as usize]
+    }
+
     /// Returns the piece at the given square, or None if empty.
     /// Returns None for invalid squares (outside 0-89).
     pub fn piece_at(&self, sq: u8) -> Option<Piece> {
@@ -373,6 +379,80 @@ impl Bitboards {
             }
         }
         attacks
+    }
+
+    /// Returns a u128 bitboard of all squares containing pieces of `color`
+    /// that can attack the given `target` square.
+    /// This is the core building block for SEE.
+    pub fn attackers(&self, target: u8, color: Color) -> u128 {
+        let occ = self.occupied_all();
+        let occ_color = self.occupied(color);
+        let rays = get_chariot_rays();
+        let mut attackers = 0u128;
+
+        // Chariot attacks: slides in 4 directions, nearest piece in each direction
+        for dir in 0..4 {
+            let ray = rays[target as usize][dir];
+            let blockers = ray & occ;
+            if blockers == 0 { continue; }
+            let nearest = Self::lsb_index(blockers);
+            if occ_color & (1_u128 << nearest) != 0 {
+                if self.pieces[PieceType::Chariot as usize][color as usize] & (1_u128 << nearest) != 0 {
+                    attackers |= 1_u128 << nearest;
+                }
+            }
+        }
+
+        // Cannon attacks: needs exactly 1 screen between src and target
+        for dir in 0..4 {
+            let ray = rays[target as usize][dir];
+            let blockers = ray & occ;
+            if blockers == 0 { continue; }
+            let nearest = Self::lsb_index(blockers);
+            if self.pieces[PieceType::Cannon as usize][color as usize] & (1_u128 << nearest) != 0 {
+                let second_blockers = ray & occ & !(rays[nearest as usize][dir]);
+                if second_blockers != 0 {
+                    // Cannon can capture through its screen
+                    attackers |= 1_u128 << nearest;
+                }
+            }
+        }
+
+        // Horse attacks: 8 L-shape destinations around target
+        // Horse at SRC attacks TAR: SRC = TAR - HORSE_DELTA
+        let horse_attacks_bb = self.horse_attacks(target);
+        let mut horse_bb = horse_attacks_bb & occ_color;
+        while horse_bb != 0 {
+            let sq = Self::lsb_index(horse_bb);
+            if self.pieces[PieceType::Horse as usize][color as usize] & (1_u128 << sq) != 0 {
+                attackers |= 1_u128 << sq;
+            }
+            horse_bb &= horse_bb - 1;
+        }
+
+        // Pawn attacks: pawns that can attack target
+        let pawn_attacks_bb = self.pawn_attacks(target, color);
+        let mut pawn_bb = pawn_attacks_bb & occ_color;
+        while pawn_bb != 0 {
+            let sq = Self::lsb_index(pawn_bb);
+            if self.pieces[PieceType::Pawn as usize][color as usize] & (1_u128 << sq) != 0 {
+                attackers |= 1_u128 << sq;
+            }
+            pawn_bb &= pawn_bb - 1;
+        }
+
+        // King attacks: 4 orthogonal moves
+        let king_attacks_bb = self.king_attacks(target);
+        let mut king_bb = king_attacks_bb & occ_color;
+        while king_bb != 0 {
+            let sq = Self::lsb_index(king_bb);
+            if self.pieces[PieceType::King as usize][color as usize] & (1_u128 << sq) != 0 {
+                attackers |= 1_u128 << sq;
+            }
+            king_bb &= king_bb - 1;
+        }
+
+        attackers
     }
 
     /// Generate all pseudo-legal move destination squares for a piece at `from`.

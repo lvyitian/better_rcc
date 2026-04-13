@@ -1461,8 +1461,11 @@ pub mod movegen {
 
         let mut board_copy = board.clone();
         let moving_piece = board_copy.get(current_attacker).unwrap();
+        let src_sq = (current_attacker.y * 9 + current_attacker.x) as u8;
+        let tar_sq = (tar.y * 9 + tar.x) as u8;
         board_copy.set_internal(tar, Some(moving_piece));
         board_copy.set_internal(current_attacker, None);
+        board_copy.bitboards.apply_move(src_sq, tar_sq, board.get(tar), moving_piece);
         side = side.opponent();
 
         loop {
@@ -1475,8 +1478,10 @@ pub mod movegen {
             swap_idx += 1;
 
             let attacker_piece = board_copy.get(attacker.unwrap()).unwrap();
+            let att_sq = (attacker.unwrap().y * 9 + attacker.unwrap().x) as u8;
             board_copy.set_internal(tar, Some(attacker_piece));
             board_copy.set_internal(attacker.unwrap(), None);
+            board_copy.bitboards.apply_move(att_sq, tar_sq, board_copy.get(tar), attacker_piece);
             side = side.opponent();
 
             if attacker_piece.piece_type == PieceType::King {
@@ -1495,145 +1500,65 @@ pub mod movegen {
     /// Find the least valuable piece that can attack a target square
     /// Returns (position, value) of the attacker
     /// Used by SEE to determine capture sequences
-    /// Optimized: searches outward from target instead of scanning all 90 squares
-    // Search for least valuable attacker of given side that can capture target position.
-    // Attack direction: from attacker SRC to target TAR = TAR - SRC = direction.
-    // Therefore: SRC = TAR - direction. We SUBTRACT deltas to find attackers.
+    /// Bitboard version: uses attackers() bitboard and finds least valuable by priority order
     fn find_least_valuable_attacker(board: &Board, tar: Coord, side: Color) -> (Option<Coord>, i32) {
-        let mut min_value = i32::MAX;
-        let mut min_attacker = None;
+        let tar_sq = (tar.y * 9 + tar.x) as u8;
+        let attackers_bb = board.bitboards.attackers(tar_sq, side);
 
-        // Search outward from target: O(1-16) for sliding pieces instead of O(90)
-
-        // Check chariot attacks (rook-like, searches along row/column)
-        // If chariot at (3, 5) attacks tar at (3, 3) moving UP, direction is (0, -1).
-        // To find it: start at tar(3,3), move toward attacker = SUBTRACT (0, -1) → (3,4) → (3,5)
-        for (dx, dy) in DIRS_4 {
-            let mut x = tar.x - dx;  // SUBTRACT to search toward attacker
-            let mut y = tar.y - dy;
-            let mut jumped = false;
-            while (0..BOARD_WIDTH).contains(&x) && (0..BOARD_HEIGHT).contains(&y) {
-                let pos = Coord::new(x, y);
-                if let Some(piece) = board.get(pos) {
-                    if piece.color == side {
-                        // Chariot attacks if no pieces between
-                        if !jumped && piece.piece_type == PieceType::Chariot && SEE_VALUE[PieceType::Chariot as usize] < min_value {
-                            min_value = SEE_VALUE[PieceType::Chariot as usize];
-                            min_attacker = Some(pos);
-                        }
-                        // Cannon attacks if exactly one screen between
-                        if jumped && piece.piece_type == PieceType::Cannon && SEE_VALUE[PieceType::Cannon as usize] < min_value {
-                            min_value = SEE_VALUE[PieceType::Cannon as usize];
-                            min_attacker = Some(pos);
-                        }
-                    }
-                    break;
-                }
-                x -= dx;  // Continue toward attacker
-                y -= dy;
-                jumped = true; // First piece encountered is the screen for cannon
-            }
+        if attackers_bb == 0 {
+            return (None, i32::MAX);
         }
 
-        // Check horse attacks (8 landing spots around target)
-        // Horse at SRC attacks tar at TAR: SRC = TAR - HORSE_DELTA
-        // Block position = SRC + BLOCKS (knee point offset from horse's src)
-        for i in 0..8 {
-            let (ox, oy) = HORSE_DELTAS[i];
-            let (bx, by) = HORSE_BLOCKS[i];
-            let horse_pos = Coord::new(tar.x - ox, tar.y - oy);  // SRC = TAR - delta
-            let block_pos = Coord::new(horse_pos.x + bx, horse_pos.y + by);  // BLOCK = SRC + BLOCKS
-            if horse_pos.is_valid() && board.get(block_pos).is_none()
-                && let Some(piece) = board.get(horse_pos)
-                    && piece.color == side && piece.piece_type == PieceType::Horse && SEE_VALUE[PieceType::Horse as usize] < min_value {
-                        min_value = SEE_VALUE[PieceType::Horse as usize];
-                        min_attacker = Some(horse_pos);
-                    }
+        // Check pawns first (lowest value in SEE_VALUE)
+        let pawns = attackers_bb & board.bitboards.piece_bitboard(PieceType::Pawn, side);
+        if pawns != 0 {
+            let sq = Bitboards::lsb_index(pawns);
+            return (Some(Coord::new((sq % 9) as i8, (sq / 9) as i8)), SEE_VALUE[PieceType::Pawn as usize]);
         }
 
-        // Check elephant attacks (4 spots, must stay on same side of river)
-        // Elephant at SRC attacks tar at TAR: SRC = TAR - ELEPHANT_DELTA
-        // Eye position = SRC + BLOCKS (eye is midpoint between elephant and tar)
-        for i in 0..4 {
-            let (ox, oy) = ELEPHANT_DELTAS[i];
-            let (bx, by) = ELEPHANT_BLOCKS[i];
-            let ele_pos = Coord::new(tar.x - ox, tar.y - oy);  // SRC = TAR - delta
-            let block_pos = Coord::new(ele_pos.x + bx, ele_pos.y + by);  // BLOCK = SRC + BLOCKS
-            if ele_pos.is_valid() && !ele_pos.crosses_river(side) && board.get(block_pos).is_none()
-                && let Some(piece) = board.get(ele_pos)
-                    && piece.color == side && piece.piece_type == PieceType::Elephant && SEE_VALUE[PieceType::Elephant as usize] < min_value {
-                        min_value = SEE_VALUE[PieceType::Elephant as usize];
-                        min_attacker = Some(ele_pos);
-                    }
+        // Check elephants
+        let elephants = attackers_bb & board.bitboards.piece_bitboard(PieceType::Elephant, side);
+        if elephants != 0 {
+            let sq = Bitboards::lsb_index(elephants);
+            return (Some(Coord::new((sq % 9) as i8, (sq / 9) as i8)), SEE_VALUE[PieceType::Elephant as usize]);
         }
 
-        // Check advisor attacks (4 spots within palace)
-        // Advisor at SRC attacks tar at TAR: SRC = TAR - ADVISOR_DELTA
-        for (ox, oy) in ADVISOR_DELTAS {
-            let adv_pos = Coord::new(tar.x - ox, tar.y - oy);  // SUBTRACT
-            if adv_pos.is_valid() && adv_pos.in_palace(side)
-                && let Some(piece) = board.get(adv_pos)
-                    && piece.color == side && piece.piece_type == PieceType::Advisor && SEE_VALUE[PieceType::Advisor as usize] < min_value {
-                        min_value = SEE_VALUE[PieceType::Advisor as usize];
-                        min_attacker = Some(adv_pos);
-                    }
+        // Check advisors
+        let advisors = attackers_bb & board.bitboards.piece_bitboard(PieceType::Advisor, side);
+        if advisors != 0 {
+            let sq = Bitboards::lsb_index(advisors);
+            return (Some(Coord::new((sq % 9) as i8, (sq / 9) as i8)), SEE_VALUE[PieceType::Advisor as usize]);
         }
 
-        // Check king attacks (4 adjacent squares within palace)
-        // King at SRC attacks tar at TAR: SRC = TAR - KING_DELTA
-        for (ox, oy) in DIRS_4 {
-            let king_pos = Coord::new(tar.x - ox, tar.y - oy);  // SUBTRACT
-            if king_pos.is_valid() && king_pos.in_palace(side)
-                && let Some(piece) = board.get(king_pos)
-                    && piece.color == side && piece.piece_type == PieceType::King && SEE_VALUE[PieceType::King as usize] < min_value {
-                        min_value = SEE_VALUE[PieceType::King as usize];
-                        min_attacker = Some(king_pos);
-                    }
+        // Check horses
+        let horses = attackers_bb & board.bitboards.piece_bitboard(PieceType::Horse, side);
+        if horses != 0 {
+            let sq = Bitboards::lsb_index(horses);
+            return (Some(Coord::new((sq % 9) as i8, (sq / 9) as i8)), SEE_VALUE[PieceType::Horse as usize]);
         }
 
-        // Check pawn attacks
-        // Red pawns move toward y=0, so a Red pawn attacking tar must be AHEAD (lower y).
-        // If pawn at (x, y) attacks tar at (tx, ty), then: pawn is at (tx, ty+1) for forward attack.
-        // So: pawn_pos = tar - (0, -1) for Red, pawn_pos = tar - (0, 1) for Black
-        // Pawn offsets: Red=(0, -1), Black=(0, 1) - pawn moves toward these to attack
-        let pawn_offsets: &[(i8, i8)] = if side == Color::Red {
-            &[(0, -1)] // Red forward: pawn is at (tar.x, tar.y - 1)
-        } else {
-            &[(0, 1)] // Black forward: pawn is at (tar.x, tar.y + 1)
-        };
-        // Pawn diagonals: Red=(±1, -1), Black=(±1, 1) - side attacks
-        let pawn_diagonals: &[(i8, i8)] = if side == Color::Red {
-            &[(-1, -1), (1, -1)] // Red side: pawn at (tar.x±1, tar.y-1)
-        } else {
-            &[(-1, 1), (1, 1)] // Black side: pawn at (tar.x±1, tar.y+1)
-        };
-
-        // Forward attack
-        for (dx, dy) in pawn_offsets {
-            let pawn_pos = Coord::new(tar.x - dx, tar.y - dy);  // SUBTRACT
-            if pawn_pos.is_valid()
-                && let Some(piece) = board.get(pawn_pos)
-                    && piece.color == side && piece.piece_type == PieceType::Pawn && SEE_VALUE[PieceType::Pawn as usize] < min_value {
-                        min_value = SEE_VALUE[PieceType::Pawn as usize];
-                        min_attacker = Some(pawn_pos);
-                    }
+        // Check cannons
+        let cannons = attackers_bb & board.bitboards.piece_bitboard(PieceType::Cannon, side);
+        if cannons != 0 {
+            let sq = Bitboards::lsb_index(cannons);
+            return (Some(Coord::new((sq % 9) as i8, (sq / 9) as i8)), SEE_VALUE[PieceType::Cannon as usize]);
         }
 
-        // Side attacks (only if pawn has crossed river)
-        let crosses_river = if side == Color::Red { tar.y <= RIVER_BOUNDARY_RED } else { tar.y >= RIVER_BOUNDARY_BLACK };
-        if crosses_river {
-            for (dx, dy) in pawn_diagonals {
-                let pawn_pos = Coord::new(tar.x - dx, tar.y - dy);  // SUBTRACT
-                if pawn_pos.is_valid()
-                    && let Some(piece) = board.get(pawn_pos)
-                        && piece.color == side && piece.piece_type == PieceType::Pawn && SEE_VALUE[PieceType::Pawn as usize] < min_value {
-                            min_value = SEE_VALUE[PieceType::Pawn as usize];
-                            min_attacker = Some(pawn_pos);
-                        }
-            }
+        // Check chariots
+        let chariots = attackers_bb & board.bitboards.piece_bitboard(PieceType::Chariot, side);
+        if chariots != 0 {
+            let sq = Bitboards::lsb_index(chariots);
+            return (Some(Coord::new((sq % 9) as i8, (sq / 9) as i8)), SEE_VALUE[PieceType::Chariot as usize]);
         }
 
-        (min_attacker, min_value)
+        // Check king
+        let kings = attackers_bb & board.bitboards.piece_bitboard(PieceType::King, side);
+        if kings != 0 {
+            let sq = Bitboards::lsb_index(kings);
+            return (Some(Coord::new((sq % 9) as i8, (sq / 9) as i8)), SEE_VALUE[PieceType::King as usize]);
+        }
+
+        (None, i32::MAX)
     }
 }
 
