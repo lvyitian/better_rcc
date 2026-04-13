@@ -357,9 +357,11 @@ impl Bitboards {
         attacks
     }
 
-    /// Cannon attacks from sq — slides until first screen, then captures through it.
-    pub fn cannon_attacks(&self, sq: u8) -> u128 {
+    /// Cannon attacks from sq — slides, returns empty squares and captures (enemy beyond 1 screen).
+    /// Excludes own-occupied squares from both quiet and capture destinations.
+    pub fn cannon_attacks(&self, sq: u8, color: Color) -> u128 {
         let occ = self.occupied_all();
+        let occ_color = self.occupied(color);
         let rays = get_chariot_rays();
         let mut attacks = 0u128;
 
@@ -367,14 +369,19 @@ impl Bitboards {
             let ray = rays[sq as usize][dir];
             let blockers = ray & occ;
             if blockers == 0 {
-                // No screen, no captures
+                attacks |= ray;  // Clear path — all empty squares reachable
             } else {
                 let nearest = Self::lsb_index(blockers);
+                // Quiet moves: all empty squares before (not including) the screen
+                attacks |= ray & !(rays[nearest as usize][dir]);
+
                 let second_blockers = ray & occ & !(rays[nearest as usize][dir]);
                 if second_blockers != 0 {
                     let second = Self::lsb_index(second_blockers);
-                    let capture_ray = ray & !(rays[second as usize][dir]);
-                    attacks |= capture_ray;
+                    // Capture only if target is NOT our own piece
+                    if occ_color & (1_u128 << second) == 0 {
+                        attacks |= 1_u128 << second;  // Capture = landing on target square
+                    }
                 }
             }
         }
