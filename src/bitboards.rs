@@ -13,6 +13,22 @@ use std::sync::OnceLock;
 /// Number of squares on the Xiangqi board
 pub const BOARD_SQ_COUNT: usize = 90;
 
+/// Mask of core area squares: x∈[3,5], y∈[3,6] (x=3,4,5; y=3,4,5,6)
+pub const CORE_AREA_MASK: u128 = {
+    let mut mask = 0u128;
+    let mut y = 3;
+    while y <= 6 {
+        let mut x = 3;
+        while x <= 5 {
+            let sq = (y * 9 + x) as u8;
+            mask |= 1_u128 << sq;
+            x += 1;
+        }
+        y += 1;
+    }
+    mask
+};
+
 /// Convert board Coord to bitboard square index (0-89)
 #[inline(always)]
 #[allow(dead_code)]
