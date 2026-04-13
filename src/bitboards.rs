@@ -279,6 +279,45 @@ impl Bitboards {
         self.piece_at(sq)
     }
 
+    /// Reconstruct the 10x9 cells array from bitboards.
+    /// Used primarily for testing to maintain compatibility with tests that
+    /// reference board cells.
+    pub fn to_cells(&self) -> [[Option<Piece>; 9]; 10] {
+        let mut cells = [[None; 9]; 10];
+        for y in 0..10 {
+            for x in 0..9 {
+                cells[y][x] = self.piece_at((y * 9 + x) as u8);
+            }
+        }
+        cells
+    }
+
+    /// Flip the bitboards vertically (swap rows 0↔9, 1↔8, 2↔7, 3↔6, 4↔5).
+    /// This is used for display purposes when showing the board from Black's perspective.
+    pub fn flip_vertically(&mut self) {
+        let mut new_pieces = [[0u128; 2]; 7];
+
+        for pt in 0..7 {
+            for c in 0..2 {
+                let bb = self.pieces[pt][c];
+                let mut new_bb = 0u128;
+                let mut sq = 0u8;
+                while sq < 90 {
+                    if bb & (1_u128 << sq) != 0 {
+                        let y = sq / 9;
+                        let x = sq % 9;
+                        let new_sq = (9 - y) as u8 * 9 + x;
+                        new_bb |= 1_u128 << new_sq;
+                    }
+                    sq += 1;
+                }
+                new_pieces[pt][c] = new_bb;
+            }
+        }
+
+        self.pieces = new_pieces;
+    }
+
     /// Find the index of the least significant set bit in a u128.
     /// Used to find the nearest blocker along a ray.
     #[inline(always)]
@@ -631,7 +670,7 @@ mod tests {
 
     #[test]
     fn test_bitboards_from_cells_matches_initial_board() {
-        let cells = Board::new(RuleSet::Official, 1).cells;
+        let cells = Board::new(RuleSet::Official, 1).cells();
         let bb = Bitboards::from_cells(&cells);
 
         let red_occ = bb.occupied(Color::Red);
@@ -643,7 +682,7 @@ mod tests {
 
     #[test]
     fn test_bitboards_occupied_all_matches_cells() {
-        let cells = Board::new(RuleSet::Official, 1).cells;
+        let cells = Board::new(RuleSet::Official, 1).cells();
         let bb = Bitboards::from_cells(&cells);
 
         let mut cell_count = 0usize;
@@ -663,7 +702,7 @@ mod tests {
     #[test]
     fn test_bitboards_piece_at_matches_cells() {
         let board = Board::new(RuleSet::Official, 1);
-        let bb = Bitboards::from_cells(&board.cells);
+        let bb = Bitboards::from_cells(&board.cells());
 
         for y in 0..10 {
             for x in 0..9 {
@@ -687,7 +726,7 @@ mod tests {
             let piece = board.get(first_move.src).unwrap();
             let captured = first_move.captured;
 
-            let mut bb = Bitboards::from_cells(&board.cells);
+            let mut bb = Bitboards::from_cells(&board.cells());
             let before_occ = bb.occupied_all();
 
             bb.apply_move(src_sq, dst_sq, captured, piece);
@@ -713,7 +752,7 @@ mod tests {
             let captured = action.captured;
 
             // Before move: bitboards should match cells
-            let bb_before = Bitboards::from_cells(&board.cells);
+            let bb_before = Bitboards::from_cells(&board.cells());
             for y in 0..10 {
                 for x in 0..9 {
                     let coord = Coord::new(x, y);
@@ -735,7 +774,7 @@ mod tests {
 
             // Undo and verify
             board.undo_move(action);
-            let bb_after_undo = Bitboards::from_cells(&board.cells);
+            let bb_after_undo = Bitboards::from_cells(&board.cells());
             for y in 0..10 {
                 for x in 0..9 {
                     let coord = Coord::new(x, y);
@@ -787,7 +826,7 @@ mod tests {
     #[test]
     fn test_count_non_king_pieces() {
         let board = Board::new(RuleSet::Official, 1);
-        let bb = Bitboards::from_cells(&board.cells);
+        let bb = Bitboards::from_cells(&board.cells());
 
         let count = bb.count_non_king_pieces();
         // Initial position: 32 pieces total, 2 kings -> 30 non-kings

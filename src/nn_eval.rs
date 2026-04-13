@@ -1,7 +1,7 @@
 // Neural network evaluation module
 // Converts board state to input planes for NN inference
 
-use crate::{Board, Color, PieceType, MATE_SCORE};
+use crate::{Board, Color, Coord, PieceType, MATE_SCORE};
 #[allow(unused_imports)]
 use crate::RuleSet;
 use crate::eval::eval_impl::{handcrafted_evaluate, game_phase};
@@ -37,7 +37,7 @@ impl InputPlanes {
 
         for y in 0..10 {
             for x in 0..9 {
-                if let Some(piece) = board.cells[y][x] {
+                if let Some(piece) = board.get(Coord::new(x as i8, y as i8)) {
                     // Determine if this piece is "ours" (side_to_move) or "theirs"
                     let our_base = match (piece.color, side_to_move) {
                         (Color::Red, Color::Red) | (Color::Black, Color::Black) => 0usize,

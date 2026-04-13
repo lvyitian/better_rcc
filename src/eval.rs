@@ -191,7 +191,7 @@ pub mod eval_impl {
         let mut phase = 0;
         for y in 0..10 {
             for x in 0..9 {
-                if let Some(p) = board.cells[y][x] {
+                if let Some(p) = board.get(Coord::new(x as i8, y as i8)) {
                     phase += PHASE_WEIGHTS[p.piece_type as usize];
                 }
             }
@@ -254,7 +254,7 @@ pub mod eval_impl {
         // Iterate over all pieces on board (max 32 total, bounded)
         for y in 0..10 {
             for x in 0..9 {
-                if let Some(piece) = board.cells[y][x] {
+                if let Some(piece) = board.get(Coord::new(x as i8, y as i8)) {
                     let pos = Coord::new(x as i8, y as i8);
                     let weight = match piece.piece_type {
                         PieceType::Chariot | PieceType::Cannon => 2,
@@ -702,7 +702,7 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
                 }
                 PieceType::Chariot => {
                     has_chariot = true;
-                    if pos.in_core_area(color) {
+                    if pos.in_core_area() {
                         chariot_in_support = true;
                     }
                 }
@@ -1072,7 +1072,7 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
 
         for y in 0..10 {
             for x in 0..9 {
-                if let Some(piece) = board.cells[y][x] {
+                if let Some(piece) = board.get(Coord::new(x as i8, y as i8)) {
                     let x_usize = x;
                     let y_usize = y;
                     let sign = piece.color.sign();
