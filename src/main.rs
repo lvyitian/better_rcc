@@ -8,6 +8,8 @@
 //! - Opening book for common patterns
 //! - Endgame tablebase for simplified positions
 
+use crate::bitboards::Bitboards;
+
 use std::cell::RefCell;
 use std::fmt;
 use std::io;
@@ -1659,6 +1661,7 @@ pub mod movegen {
 #[derive(Clone)]
 pub struct Board {
     pub cells: [[Option<Piece>; 9]; 10],  // cells[y][x], None = empty
+    pub bitboards: Bitboards,
     pub zobrist_key: u64,                  // Incremental position hash
     pub current_side: Color,                // Side to move
     pub rule_set: RuleSet,                 // Game rules (affects repetition detection)
@@ -1740,6 +1743,7 @@ impl Board {
 
         Board {
             cells,
+            bitboards: Bitboards::from_cells(&cells),
             zobrist_key,
             current_side: match order { 1 => Color::Red, 2 => Color::Black, _=>unreachable!() },
             rule_set,
@@ -1856,6 +1860,7 @@ impl Board {
 
         Board {
             cells,
+            bitboards: Bitboards::from_cells(&cells),
             zobrist_key,
             current_side,
             rule_set: RuleSet::Official,
@@ -1948,6 +1953,11 @@ impl Board {
             return;
         };
 
+        // Update bitboards BEFORE moving pieces
+        let src_sq = (action.src.y * 9 + action.src.x) as u8;
+        let dst_sq = (action.tar.y * 9 + action.tar.x) as u8;
+        self.bitboards.apply_move(src_sq, dst_sq, action.captured, piece);
+
         // Move piece to target, clear source
         self.set_internal(action.tar, Some(piece));
         self.set_internal(action.src, None);
@@ -1993,6 +2003,11 @@ impl Board {
         }
 
         let piece = self.get(action.tar).expect("undo_move: tar square must not be empty");
+        // Update bitboards BEFORE restoring pieces
+        let src_sq = (action.src.y * 9 + action.src.x) as u8;
+        let dst_sq = (action.tar.y * 9 + action.tar.x) as u8;
+        self.bitboards.undo_move(src_sq, dst_sq, action.captured, piece);
+
         self.set_internal(action.src, Some(piece));
         self.set_internal(action.tar, action.captured);
 
@@ -2460,6 +2475,7 @@ impl fmt::Display for Board {
 mod eval;
 mod nn_eval;
 mod nnue_input;
+mod bitboards;
 #[cfg(feature = "train")]
 mod nn_train;
 #[cfg(feature = "train")]
@@ -4021,6 +4037,7 @@ mod tests {
         }
         Board {
             cells,
+            bitboards: Bitboards::from_cells(&cells),
             zobrist_key: 0,
             current_side: Color::Red,
             rule_set: RuleSet::Official,
@@ -4359,8 +4376,8 @@ mod tests {
         let capture_pawn2 = Action::new(Coord::new(0, 0), Coord::new(1, 1), Some(Piece { color: Color::Black, piece_type: PieceType::Pawn }));
 
         assert!(capture_chariot.mvv_lva_score() > capture_horse.mvv_lva_score());
-        assert!(capture_horse.mvv_lva_score() >= capture_cannon.mvv_lva_score());  // Horse ≥ Cannon (both conditional)
-        assert!(capture_cannon.mvv_lva_score() > capture_advisor.mvv_lva_score());
+        assert!(capture_cannon.mvv_lva_score() > capture_horse.mvv_lva_score());  // Cannon > Horse (both conditional)
+        assert!(capture_horse.mvv_lva_score() >= capture_advisor.mvv_lva_score());
         assert!(capture_advisor.mvv_lva_score() > capture_elephant.mvv_lva_score());
         assert!(capture_elephant.mvv_lva_score() >= capture_pawn2.mvv_lva_score()); // Elephant >= Pawn
     }
