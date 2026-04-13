@@ -332,8 +332,10 @@ impl Bitboards {
     }
 
     /// Chariot attacks from sq — all squares in 4 cardinal directions until first blocker.
-    pub fn chariot_attacks(&self, sq: u8) -> u128 {
+    /// Returns all reachable squares (empty OR enemy-capturable). Friendly pieces block.
+    pub fn chariot_attacks(&self, sq: u8, color: Color) -> u128 {
         let occ = self.occupied_all();
+        let occ_color = self.occupied(color);
         let rays = get_chariot_rays();
         let mut attacks = 0u128;
 
@@ -341,11 +343,15 @@ impl Bitboards {
             let ray = rays[sq as usize][dir];
             let blockers = ray & occ;
             if blockers == 0 {
-                attacks |= ray;
+                attacks |= ray;  // Clear path — all squares reachable
             } else {
                 let nearest = Self::lsb_index(blockers);
-                let ray_to_nearest = ray & !(rays[nearest as usize][dir]);
-                attacks |= ray_to_nearest;
+                // Only include squares up to nearest if it is NOT our piece
+                if occ_color & (1_u128 << nearest) == 0 {
+                    let ray_to_nearest = ray & !(rays[nearest as usize][dir]);
+                    attacks |= ray_to_nearest;  // Includes nearest enemy square (capture)
+                }
+                // If nearest is our own piece: no squares attacked in this direction (blocked)
             }
         }
         attacks
