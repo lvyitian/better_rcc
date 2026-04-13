@@ -1025,4 +1025,32 @@ mod tests {
         // Initial position: 32 pieces total, 2 kings -> 30 non-kings
         assert_eq!(count, 30, "Initial position should have 30 non-king pieces");
     }
+
+    #[test]
+    fn test_movegen_bb_matches_movegen_on_initial_position() {
+        use crate::movegen;
+        let board = Board::new(RuleSet::Official, 1);
+
+        let old_moves = movegen::generate_pseudo_moves(&board, Color::Red);
+        let new_moves = Bitboards::generate_pseudo_moves_bitboards(&board, Color::Red);
+
+        assert_eq!(old_moves.len(), new_moves.len(), "Move counts differ for Red on initial position");
+        for action in &new_moves {
+            assert!(old_moves.contains(action), "New movegen produced move not in old: {:?}", action);
+        }
+        for action in &old_moves {
+            assert!(new_moves.contains(action), "Old movegen produced move not in new: {:?}", action);
+        }
+
+        // Also test Black
+        let old_moves_black = movegen::generate_pseudo_moves(&board, Color::Black);
+        let new_moves_black = Bitboards::generate_pseudo_moves_bitboards(&board, Color::Black);
+        assert_eq!(old_moves_black.len(), new_moves_black.len());
+        for action in &new_moves_black {
+            assert!(old_moves_black.contains(action), "New movegen produced move not in old for Black: {:?}", action);
+        }
+        for action in &old_moves_black {
+            assert!(new_moves_black.contains(action), "Old movegen produced move not in new for Black: {:?}", action);
+        }
+    }
 }
