@@ -6,6 +6,7 @@
 //! Bit index formula: `sq = y * 9 + x` where x=0-8, y=0-9
 
 use crate::{Color, Piece, PieceType, Coord};
+use smallvec::SmallVec;
 use std::sync::OnceLock;
 
 /// Number of squares on the Xiangqi board
@@ -458,8 +459,8 @@ impl Bitboards {
     /// Generate all pseudo-legal move destination squares for a piece at `from`.
     /// Returns a Vec of destination squares (u8 bitboard indices).
     /// Caller filters by occupancy and color to determine captures vs quiet moves.
-    pub fn generate_moves(&self, from: u8, color: Color) -> Vec<u8> {
-        let mut destinations = Vec::with_capacity(17);
+    pub fn generate_moves(&self, from: u8, color: Color) -> SmallVec<[u8; 17]> {
+        let mut destinations = SmallVec::new();
         let attacks = match () {
             _ if self.pieces[PieceType::Chariot as usize][color as usize] & (1_u128 << from) != 0 => {
                 self.chariot_attacks(from)
@@ -496,8 +497,8 @@ impl Bitboards {
 
     /// Generate all pseudo-legal moves for a color (piece at each occupied square).
     /// Returns vector of (src, dst, captured_piece) tuples.
-    pub fn generate_pseudo_moves(&self, color: Color) -> Vec<(u8, u8, Option<Piece>)> {
-        let mut moves = Vec::with_capacity(64);
+    pub fn generate_pseudo_moves(&self, color: Color) -> SmallVec<[(u8, u8, Option<Piece>); 64]> {
+        let mut moves = SmallVec::new();
         let own = self.occupied(color);
 
         let mut bb = own;
@@ -579,6 +580,25 @@ impl Bitboards {
             count += self.pieces[pt][1].count_ones() as u8;
         }
         count
+    }
+
+    /// Find the position of the king of the given color using bitscan.
+    /// Returns None if the king has been captured.
+    #[inline(always)]
+    pub fn king_pos(&self, color: Color) -> Option<Coord> {
+        let king_bb = self.pieces[PieceType::King as usize][color as usize];
+        if king_bb == 0 {
+            return None;
+        }
+        let sq = Self::lsb_index(king_bb);
+        Some(Coord::new((sq % 9) as i8, (sq / 9) as i8))
+    }
+
+    /// Find positions of both kings using bitscan.
+    /// Returns (red_king_pos, black_king_pos) - either may be None if captured.
+    #[inline(always)]
+    pub fn find_kings(&self) -> (Option<Coord>, Option<Coord>) {
+        (self.king_pos(Color::Red), self.king_pos(Color::Black))
     }
 }
 
