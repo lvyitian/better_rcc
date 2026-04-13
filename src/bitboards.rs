@@ -388,9 +388,55 @@ impl Bitboards {
         attacks
     }
 
-    /// Horse attacks from sq — 8 L-shape destinations (knee square unchecked by this function).
-    pub fn horse_attacks(&self, sq: u8) -> u128 {
-        get_horse_attacks()[sq as usize].iter().fold(0u128, |acc, &m| acc | m)
+    /// Horse attacks from sq — 8 L-shape destinations, knee square must be empty.
+    /// Returns empty or enemy-capturable squares.
+    pub fn horse_attacks(&self, sq: u8, color: Color) -> u128 {
+        let x = (sq % 9) as i8;
+        let y = (sq / 9) as i8;
+        let occ = self.occupied_all();
+        let occ_color = self.occupied(color);
+
+        let horse_deltas: [(i8, i8); 8] = [
+            (2, 1), (2, -1), (-2, 1), (-2, -1),
+            (1, 2), (1, -2), (-1, 2), (-1, -2)
+        ];
+        let horse_blocks: [(i8, i8); 8] = [
+            (1, 0), (1, 0), (-1, 0), (-1, 0),
+            (0, 1), (0, -1), (0, 1), (0, -1)
+        ];
+
+        let mut attacks = 0u128;
+        for i in 0..8 {
+            let (dx, dy) = horse_deltas[i];
+            let (bx, by) = horse_blocks[i];
+            let tar_x = x + dx;
+            let tar_y = y + dy;
+            let knee_x = x + bx;
+            let knee_y = y + by;
+
+            // Knee must be on board and empty
+            if !(0..9).contains(&knee_x) || !(0..10).contains(&knee_y) {
+                continue;
+            }
+            let knee_sq = (knee_y * 9 + knee_x) as u8;
+            if occ & (1_u128 << knee_sq) != 0 {
+                continue; // knee is blocked
+            }
+
+            // Target must be on board
+            if !(0..9).contains(&tar_x) || !(0..10).contains(&tar_y) {
+                continue;
+            }
+
+            let tar_sq = (tar_y * 9 + tar_x) as u8;
+            // Target must not be own-occupied
+            if occ_color & (1_u128 << tar_sq) != 0 {
+                continue;
+            }
+
+            attacks |= 1_u128 << tar_sq;
+        }
+        attacks
     }
 
     /// Advisor attacks from sq — 4 diagonal destinations (palace-bound checked by caller).
