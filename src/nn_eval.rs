@@ -179,7 +179,7 @@ use crate::nnue_input::{INPUT_DIM, FT_DIM, NUM_BUCKETS, QA, QB, SCALE, bucket_in
 
 /// Feature transform output: 1024 i16 values, cache-line aligned for SIMD.
 #[repr(C, align(64))]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Accumulator {
     pub vals: [i16; FT_DIM],
 }
@@ -447,7 +447,7 @@ impl NNUEFeedForward {
     /// Compute accumulators for stm and ntm inputs.
     /// Each accumulator = ft_bias + sum over active features of ft_weights[feature].
     /// Result clamped to [0, QA] and stored as i16.
-    fn compute_accumulators(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM]) -> (Accumulator, Accumulator) {
+    pub fn compute_accumulators(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM]) -> (Accumulator, Accumulator) {
         let mut stm_acc = Accumulator::zero();
         let mut ntm_acc = Accumulator::zero();
 
@@ -680,7 +680,7 @@ pub struct NNOutput {
 }
 
 /// Global NN instance, lazily initialized from file if present, random otherwise.
-static NN_NET: std::sync::LazyLock<NNUEFeedForward> =
+pub static NN_NET: std::sync::LazyLock<NNUEFeedForward> =
     std::sync::LazyLock::new(|| NNUEFeedForward::load_from_file("nn_weights.bin"));
 
 /// Hybrid NN + handcrafted evaluation.
