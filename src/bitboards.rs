@@ -301,7 +301,7 @@ impl Bitboards {
                     if bb & (1_u128 << sq) != 0 {
                         let y = sq / 9;
                         let x = sq % 9;
-                        let new_sq = (9 - y) as u8 * 9 + x;
+                        let new_sq = (9 - y) * 9 + x;
                         new_bb |= 1_u128 << new_sq;
                     }
                     sq += 1;
@@ -408,7 +408,7 @@ impl Bitboards {
         if crossed {
             for dx in [-1, 1] {
                 let sx = x + dx;
-                if sx >= 0 && sx < 9 {
+                if (0..9).contains(&sx) {
                     attacks |= 1_u128 << (y * 9 + sx) as u8;
                 }
             }
@@ -799,9 +799,9 @@ mod tests {
         let mut board2 = Board::new(RuleSet::Official, 1);
         for _ in 0..5 {
             let side = board2.current_side;
-            let mut moves = generate_legal_moves(&mut board2, side);
+            let moves = generate_legal_moves(&mut board2, side);
             if moves.is_empty() { break; }
-            let idx = (board2.zobrist_key as usize % moves.len()) as usize;
+            let idx = (board2.zobrist_key as usize % moves.len());
             board2.make_move(moves[idx]);
         }
 
