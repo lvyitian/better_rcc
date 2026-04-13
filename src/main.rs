@@ -1881,6 +1881,16 @@ impl Board {
     /// The move must have been made with make_move() - we assume the history
     /// is consistent. The action's captured field holds what was taken.
     pub fn undo_move(&mut self, action: Action) {
+        // Restore NNUE state from snapshot
+        if let Some(snap) = action.nnue_snapshot {
+            self.nnue_state.red_acc = snap.red_acc;
+            self.nnue_state.black_acc = snap.black_acc;
+            self.nnue_state.non_king_count = snap.non_king_count;
+            self.nnue_state.dirty = false;
+            // Remove the pre-move position from cache (it will be re-inserted if reached again)
+            crate::nnue_state::nnue_cache_remove(&self.zobrist_key);
+        }
+
         // Decrement or remove repetition count
         if let Some(count) = self.repetition_history.get_mut(&self.zobrist_key) {
             *count -= 1;
