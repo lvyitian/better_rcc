@@ -439,9 +439,29 @@ impl Bitboards {
         attacks
     }
 
-    /// Advisor attacks from sq — 4 diagonal destinations (palace-bound checked by caller).
-    pub fn advisor_attacks(&self, sq: u8) -> u128 {
-        get_advisor_attacks()[sq as usize].iter().fold(0u128, |acc, &m| acc | m)
+    /// Advisor attacks from sq — 4 diagonal destinations, palace-bound.
+    /// Returns empty or enemy-capturable squares.
+    pub fn advisor_attacks(&self, sq: u8, color: Color) -> u128 {
+        let x = (sq % 9) as i8;
+        let y = (sq / 9) as i8;
+        let occ_color = self.occupied(color);
+
+        let deltas = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+        let mut attacks = 0u128;
+        for (dx, dy) in deltas {
+            let tx = x + dx;
+            let ty = y + dy;
+            let target = Coord::new(tx, ty);
+            // Palace bounds check
+            if !target.is_valid() || !target.in_palace(color) {
+                continue;
+            }
+            let tsq = (ty * 9 + tx) as u8;
+            if occ_color & (1_u128 << tsq) == 0 {
+                attacks |= 1_u128 << tsq;
+            }
+        }
+        attacks
     }
 
     /// Elephant attacks from sq — 4 diagonal destinations (river-bound checked by caller).
