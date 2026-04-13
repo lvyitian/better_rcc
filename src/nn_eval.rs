@@ -706,7 +706,7 @@ pub static NN_NET: std::sync::LazyLock<NNUEFeedForward> =
 /// Where alpha, beta ∈ [0.05, 0.95] (sigmoid-clamped), nn_score ∈ [-400, 400],
 /// correction ∈ [-400, 400], handcrafted_score is in centipawns.
 #[allow(dead_code)]
-pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) -> i32 {
+pub fn nn_evaluate_or_handcrafted(board: &mut Board, side: Color, initiative: bool) -> i32 {
     let handcrafted = handcrafted_evaluate(board, side, initiative);
 
     // Compute NN output based on side and dirty flag
@@ -727,6 +727,13 @@ pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) 
             let (stm, ntm) = crate::nnue_input::NNInputPlanes::from_board(board);
             let (ra, ba) = NN_NET.compute_accumulators(&stm.data, &ntm.data);
             let nc = crate::nnue_input::count_non_king_pieces(board);
+            // Write back to board state and cache
+            board.nnue_state.red_acc = ra.clone();
+            board.nnue_state.black_acc = ba.clone();
+            board.nnue_state.non_king_count = nc;
+            board.nnue_state.dirty = false;
+            nnue_cache_insert(board.zobrist_key, (ra.clone(), ba.clone(), nc));
+            // Now select accumulators
             let stm_acc = if side == Color::Red { &ra } else { &ba };
             let ntm_acc = if side == Color::Red { &ba } else { &ra };
             NN_NET.forward_output_from_accumulators(stm_acc, ntm_acc, nc)

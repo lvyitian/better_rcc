@@ -3698,7 +3698,7 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
 
 /// Main evaluation entry point. Currently dispatches to handcrafted evaluation.
 /// In the future, this will route to the neural network when available.
-pub fn evaluate(board: &Board, side: Color, initiative: bool) -> i32 {
+pub fn evaluate(board: &mut Board, side: Color, initiative: bool) -> i32 {
     nn_eval::nn_evaluate_or_handcrafted(board, side, initiative)
 }
 
@@ -4664,9 +4664,9 @@ mod tests {
 
     #[test]
     fn fuzz_evaluate_no_panic_initial_position() {
-        let board = Board::new(RuleSet::Official, 1);
-        let _ = crate::evaluate(&board, Color::Red, false);
-        let _ = crate::evaluate(&board, Color::Black, false);
+        let mut board = Board::new(RuleSet::Official, 1);
+        let _ = crate::evaluate(&mut board, Color::Red, false);
+        let _ = crate::evaluate(&mut board, Color::Black, false);
     }
 
     #[test]
@@ -4699,7 +4699,7 @@ mod tests {
             board.make_move(chosen);
 
             // Evaluate position - should not panic
-            let _ = crate::evaluate(&board, side, false);
+            let _ = crate::evaluate(&mut board, side, false);
         }
     }
 
@@ -7175,9 +7175,9 @@ mod tests {
     #[test]
     #[ignore]
     fn test_eval_returns_reasonable_values() {
-        let board = Board::new(RuleSet::Official, 1);
-        let red_eval = crate::evaluate(&board, Color::Red, false);
-        let black_eval = crate::evaluate(&board, Color::Black, false);
+        let mut board = Board::new(RuleSet::Official, 1);
+        let red_eval = crate::evaluate(&mut board, Color::Red, false);
+        let black_eval = crate::evaluate(&mut board, Color::Black, false);
         // Red evaluates positive, Black evaluates negative (proper sign convention)
         assert!(red_eval > 0, "Red should have positive evaluation: {}", red_eval);
         assert!(black_eval < 0, "Black should have negative evaluation: {}", black_eval);
@@ -7192,21 +7192,21 @@ mod tests {
     fn test_eval_symmetry_red_black() {
         let mut board = Board::new(RuleSet::Official, 1);
         board.current_side = Color::Red;
-        let red_eval = crate::evaluate(&board, Color::Red, false);
-        let black_eval = crate::evaluate(&board, Color::Black, false);
+        let red_eval = crate::evaluate(&mut board, Color::Red, false);
+        let black_eval = crate::evaluate(&mut board, Color::Black, false);
         assert_eq!(red_eval, -black_eval,
             " evaluations should be negated: Red={}, Black={}", red_eval, black_eval);
     }
 
     #[test]
     fn test_mate_score_detection() {
-        let board = make_board(vec![
+        let mut board = make_board(vec![
             (4, 9, Color::Red, PieceType::King),
             (4, 0, Color::Black, PieceType::King),
             (4, 1, Color::Red, PieceType::Chariot), // Red chariot checking Black king
         ]);
         // Black is in check, verify evaluation doesn't panic
-        let _ = crate::evaluate(&board, Color::Black, false);
+        let _ = crate::evaluate(&mut board, Color::Black, false);
     }
 
     // -------------------------------------------------------------------------
@@ -7377,19 +7377,19 @@ mod tests {
     #[test]
     fn test_pst_val_returns_positive_for_good_squares() {
         // Test that chariot evaluates higher than horse (both with kings present)
-        let board_chariot = make_board(vec![
+        let mut board_chariot = make_board(vec![
             (4, 9, Color::Red, PieceType::King),
             (4, 4, Color::Red, PieceType::Chariot),
             (4, 0, Color::Black, PieceType::King),
         ]);
-        let chariot_eval = crate::evaluate(&board_chariot, Color::Red, false);
+        let chariot_eval = crate::evaluate(&mut board_chariot, Color::Red, false);
 
-        let board_horse = make_board(vec![
+        let mut board_horse = make_board(vec![
             (4, 9, Color::Red, PieceType::King),
             (4, 4, Color::Red, PieceType::Horse),
             (4, 0, Color::Black, PieceType::King),
         ]);
-        let horse_eval = crate::evaluate(&board_horse, Color::Red, false);
+        let horse_eval = crate::evaluate(&mut board_horse, Color::Red, false);
 
         // Chariot (650) + PST should be > Horse (350) + PST
         assert!(chariot_eval > horse_eval,
@@ -7447,7 +7447,7 @@ mod tests {
             assert!(rk.is_some() || bk.is_some(), "At least one king must remain");
 
             // Evaluate should not panic
-            let _ = crate::evaluate(&board, side, false);
+            let _ = crate::evaluate(&mut board, side, false);
         }
     }
 
