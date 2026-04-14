@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 smallvec = "1"
+mimalloc = "0.1.48"
+ahash = "0.8"
 ndarray = "0.17"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
