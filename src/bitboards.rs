@@ -39,10 +39,6 @@ static CHARIOT_RAYS_STORAGE: OnceLock<[[u128; 4]; BOARD_SQ_COUNT]> = OnceLock::n
 /// CANNON_SCREENS_STORAGE[sq][dir] = mask of squares between sq and first blocker (used for cannon captures)
 #[allow(dead_code)]
 static CANNON_SCREENS_STORAGE: OnceLock<[[u128; 4]; BOARD_SQ_COUNT]> = OnceLock::new();
-static HORSE_ATTACKS_STORAGE: OnceLock<[[u128; 8]; BOARD_SQ_COUNT]> = OnceLock::new();
-static ADVISOR_ATTACKS_STORAGE: OnceLock<[[u128; 4]; BOARD_SQ_COUNT]> = OnceLock::new();
-static ELEPHANT_ATTACKS_STORAGE: OnceLock<[[u128; 4]; BOARD_SQ_COUNT]> = OnceLock::new();
-static KING_ATTACKS_STORAGE: OnceLock<[u128; BOARD_SQ_COUNT]> = OnceLock::new();
 
 /// Initialize CHARIOT_RAYS and CANNON_SCREENS tables.
 /// Each entry is a u128 mask of squares along a ray from sq in one direction.
@@ -173,22 +169,6 @@ pub fn init_non_slide_attacks() -> (
     }
 
     (horse_attacks, advisor_attacks, elephant_attacks, king_attacks)
-}
-
-pub fn get_horse_attacks() -> &'static [[u128; 8]; BOARD_SQ_COUNT] {
-    HORSE_ATTACKS_STORAGE.get_or_init(|| init_non_slide_attacks().0)
-}
-
-pub fn get_advisor_attacks() -> &'static [[u128; 4]; BOARD_SQ_COUNT] {
-    ADVISOR_ATTACKS_STORAGE.get_or_init(|| init_non_slide_attacks().1)
-}
-
-pub fn get_elephant_attacks() -> &'static [[u128; 4]; BOARD_SQ_COUNT] {
-    ELEPHANT_ATTACKS_STORAGE.get_or_init(|| init_non_slide_attacks().2)
-}
-
-pub fn get_king_attacks() -> &'static [u128; BOARD_SQ_COUNT] {
-    KING_ATTACKS_STORAGE.get_or_init(|| init_non_slide_attacks().3)
 }
 
 /// Get CHARIOT_RAYS table (lazily initialized)
@@ -358,8 +338,10 @@ impl Bitboards {
     }
 
     /// Cannon attacks from sq — slides until first screen, then captures through it.
-    pub fn cannon_attacks(&self, sq: u8, _color: Color) -> u128 {
+    /// Filters out own-occupied squares from capture destinations.
+    pub fn cannon_attacks(&self, sq: u8, color: Color) -> u128 {
         let occ = self.occupied_all();
+        let occ_color = self.occupied(color);
         let rays = get_chariot_rays();
         let mut attacks = 0u128;
 
@@ -367,51 +349,193 @@ impl Bitboards {
             let ray = rays[sq as usize][dir];
             let blockers = ray & occ;
             if blockers == 0 {
-                // No screen, no captures
+                // No screen, no captures - all squares along ray are empty (already in ray)
+                attacks |= ray;
             } else {
                 let nearest = Self::lsb_index(blockers);
+                // Quiet moves: all empty squares before (not including) the screen
+                let quiet_ray = ray & !(rays[nearest as usize][dir]);
+                attacks |= quiet_ray;
+
                 let second_blockers = ray & occ & !(rays[nearest as usize][dir]);
                 if second_blockers != 0 {
                     let second = Self::lsb_index(second_blockers);
-                    let capture_ray = ray & !(rays[second as usize][dir]);
-                    attacks |= capture_ray;
+                    // Capture only if target is NOT our own piece
+                    if occ_color & (1_u128 << second) == 0 {
+                        attacks |= 1_u128 << second;
+                    }
                 }
             }
         }
         attacks
     }
 
-    /// Horse attacks from sq — 8 L-shape destinations (knee square unchecked by this function).
-    pub fn horse_attacks(&self, sq: u8, _color: Color) -> u128 {
-        get_horse_attacks()[sq as usize].iter().fold(0u128, |acc, &m| acc | m)
+    /// Horse attacks from sq — 8 L-shape destinations, knee square must be empty.
+    /// Filters out own-occupied destination squares.
+    pub fn horse_attacks(&self, sq: u8, color: Color) -> u128 {
+        let x = (sq % 9) as i8;
+        let y = (sq / 9) as i8;
+        let occ = self.occupied_all();
+        let occ_color = self.occupied(color);
+
+        let horse_deltas: [(i8, i8); 8] = [
+            (2, 1), (2, -1), (-2, 1), (-2, -1),
+            (1, 2), (1, -2), (-1, 2), (-1, -2)
+        ];
+        let horse_blocks: [(i8, i8); 8] = [
+            (1, 0), (1, 0), (-1, 0), (-1, 0),
+            (0, 1), (0, -1), (0, 1), (0, -1)
+        ];
+
+        let mut attacks = 0u128;
+        for i in 0..8 {
+            let (dx, dy) = horse_deltas[i];
+            let (bx, by) = horse_blocks[i];
+            let tar_x = x + dx;
+            let tar_y = y + dy;
+            let knee_x = x + bx;
+            let knee_y = y + by;
+
+            // Knee must be on board and empty
+            if !(0..9).contains(&knee_x) || !(0..10).contains(&knee_y) {
+                continue;
+            }
+            let knee_sq = (knee_y * 9 + knee_x) as u8;
+            if occ & (1_u128 << knee_sq) != 0 {
+                continue; // knee is blocked
+            }
+
+            // Target must be on board
+            if !(0..9).contains(&tar_x) || !(0..10).contains(&tar_y) {
+                continue;
+            }
+
+            let tar_sq = (tar_y * 9 + tar_x) as u8;
+            // Target must not be own-occupied
+            if occ_color & (1_u128 << tar_sq) != 0 {
+                continue;
+            }
+
+            attacks |= 1_u128 << tar_sq;
+        }
+        attacks
     }
 
-    /// Advisor attacks from sq — 4 diagonal destinations (palace-bound checked by caller).
-    pub fn advisor_attacks(&self, sq: u8, _color: Color) -> u128 {
-        get_advisor_attacks()[sq as usize].iter().fold(0u128, |acc, &m| acc | m)
+    /// Advisor attacks from sq — 4 diagonal destinations, palace-bound.
+    /// Filters out own-occupied destination squares.
+    pub fn advisor_attacks(&self, sq: u8, color: Color) -> u128 {
+        let x = (sq % 9) as i8;
+        let y = (sq / 9) as i8;
+        let occ_color = self.occupied(color);
+
+        let deltas = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+        let mut attacks = 0u128;
+        for (dx, dy) in deltas {
+            let tx = x + dx;
+            let ty = y + dy;
+            let target = Coord::new(tx, ty);
+            // Palace bounds check
+            if !target.is_valid() || !target.in_palace(color) {
+                continue;
+            }
+            let tsq = (ty * 9 + tx) as u8;
+            if occ_color & (1_u128 << tsq) == 0 {
+                attacks |= 1_u128 << tsq;
+            }
+        }
+        attacks
     }
 
-    /// Elephant attacks from sq — 4 diagonal destinations (river-bound checked by caller).
-    pub fn elephant_attacks(&self, sq: u8, _color: Color) -> u128 {
-        get_elephant_attacks()[sq as usize].iter().fold(0u128, |acc, &m| acc | m)
+    /// Elephant attacks from sq — 4 diagonal destinations, eye must be empty, cannot cross river.
+    /// Filters out own-occupied destination squares.
+    pub fn elephant_attacks(&self, sq: u8, color: Color) -> u128 {
+        let x = (sq % 9) as i8;
+        let y = (sq / 9) as i8;
+        let occ_color = self.occupied(color);
+        let occ_all = self.occupied_all();
+
+        let deltas = [(2, 2), (2, -2), (-2, 2), (-2, -2)];
+        let blocks = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+        let mut attacks = 0u128;
+        for i in 0..4 {
+            let (dx, dy) = deltas[i];
+            let (bx, by) = blocks[i];
+            let tx = x + dx;
+            let ty = y + dy;
+            let bx = x + bx;
+            let by = y + by;
+
+            // Eye square must be empty
+            if (0..9).contains(&bx) && (0..10).contains(&by) {
+                let eye_sq = (by * 9 + bx) as u8;
+                if occ_all & (1_u128 << eye_sq) != 0 {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            // Target must be on board
+            if !(0..9).contains(&tx) || !(0..10).contains(&ty) {
+                continue;
+            }
+
+            // River check: elephant cannot cross
+            let target_coord = Coord::new(tx, ty);
+            if target_coord.crosses_river(color) {
+                continue;
+            }
+
+            let tsq = (ty * 9 + tx) as u8;
+            // Filter own-occupied
+            if occ_color & (1_u128 << tsq) == 0 {
+                attacks |= 1_u128 << tsq;
+            }
+        }
+        attacks
     }
 
-    /// King attacks from sq — 4 orthogonal destinations (palace-bound checked by caller).
-    pub fn king_attacks(&self, sq: u8, _color: Color) -> u128 {
-        get_king_attacks()[sq as usize]
+    /// King attacks from sq — 4 orthogonal destinations, palace-bound.
+    /// Filters out own-occupied destination squares.
+    pub fn king_attacks(&self, sq: u8, color: Color) -> u128 {
+        let x = (sq % 9) as i8;
+        let y = (sq / 9) as i8;
+        let occ_color = self.occupied(color);
+
+        let offsets = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+        let mut attacks = 0u128;
+        for (dx, dy) in offsets {
+            let tx = x + dx;
+            let ty = y + dy;
+            let target = Coord::new(tx, ty);
+            // Palace bounds check
+            if !target.is_valid() || !target.in_palace(color) {
+                continue;
+            }
+            let tsq = (ty * 9 + tx) as u8;
+            if occ_color & (1_u128 << tsq) == 0 {
+                attacks |= 1_u128 << tsq;
+            }
+        }
+        attacks
     }
 
     /// Pawn attacks from sq for the given color.
     /// Returns attack squares (forward + side if crossed river).
+    /// Filters out own-occupied destination squares.
     pub fn pawn_attacks(&self, sq: u8, color: Color) -> u128 {
         let x = (sq % 9) as i8;
         let y = (sq / 9) as i8;
         let dir: i8 = if color == Color::Red { -1 } else { 1 };
+        let occ_color = self.occupied(color);
         let mut attacks = 0u128;
 
         let forward_sq = (y + dir, x);
         if forward_sq.0 >= 0 && forward_sq.0 < 10 {
-            attacks |= 1_u128 << (forward_sq.0 * 9 + forward_sq.1) as u8;
+            let fsq = (forward_sq.0 * 9 + forward_sq.1) as u8;
+            if occ_color & (1_u128 << fsq) == 0 {
+                attacks |= 1_u128 << fsq;
+            }
         }
 
         // Side moves only after crossing river
@@ -420,7 +544,10 @@ impl Bitboards {
             for dx in [-1, 1] {
                 let sx = x + dx;
                 if (0..9).contains(&sx) {
-                    attacks |= 1_u128 << (y * 9 + sx) as u8;
+                    let ssq = (y * 9 + sx) as u8;
+                    if occ_color & (1_u128 << ssq) == 0 {
+                        attacks |= 1_u128 << ssq;
+                    }
                 }
             }
         }
