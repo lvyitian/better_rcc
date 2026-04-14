@@ -7,11 +7,11 @@ edition = "2024"
 smallvec = "1"
 mimalloc = "0.1.48"
 ahash = "0.8"
-ndarray = "0.17"
+ndarray = { version = "0.17", optional = true }
 serde = { version = "1", features = ["derive"] }
-bincode = "1"
-encoding_rs = "0.8"
-zstd = "0.13"
+encoding_rs = { version = "0.8", optional = true }
+zstd = { version = "0.13", optional = true }
+bincode = { version = "1", optional = true }
 
 [dev-dependencies]
 rand = "0.8"
@@ -41,7 +41,8 @@ version = "0.21.0-pre.3"
 optional = true
 
 [features]
-train = ["dep:burn", "dep:burn-ndarray", "dep:burn-autodiff", "dep:burn-nn", "dep:burn-optim", "dep:burn-derive"]
+train = ["dep:burn", "dep:burn-ndarray", "dep:burn-autodiff", "dep:burn-nn", "dep:burn-optim", "dep:burn-derive", "dep:encoding_rs", "nnue"]
+nnue = ["dep:zstd", "dep:bincode", "dep:ndarray"]
 burn = []
 burn-ndarray = ["burn"]
 burn-autodiff = ["burn"]

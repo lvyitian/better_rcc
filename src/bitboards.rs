@@ -915,6 +915,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "nnue")]
     #[test]
     fn test_bitboards_nnue_equivalence() {
         use crate::nnue_input::NNInputPlanes;

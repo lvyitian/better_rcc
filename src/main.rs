@@ -2245,7 +2245,9 @@ impl fmt::Display for Board {
 ///
 /// The evaluation function estimates who's winning a position without searching.
 mod eval;
+#[cfg(feature = "nnue")]
 mod nn_eval;
+#[cfg(feature = "nnue")]
 mod nnue_input;
 mod bitboards;
 #[cfg(feature = "train")]
@@ -3668,10 +3670,17 @@ fn run_training_menu(stdin: &io::Stdin, input: &mut String) -> Result<(), Box<dy
 // EVALUATION DISPATCH
 // =============================================================================
 
-/// Main evaluation entry point. Currently dispatches to handcrafted evaluation.
-/// In the future, this will route to the neural network when available.
+/// Main evaluation entry point. Routes to neural network when the nnue feature is
+/// enabled, otherwise falls back to pure handcrafted evaluation.
 pub fn evaluate(board: &Board, side: Color, initiative: bool) -> i32 {
-    nn_eval::nn_evaluate_or_handcrafted(board, side, initiative)
+    #[cfg(feature = "nnue")]
+    {
+        nn_eval::nn_evaluate_or_handcrafted(board, side, initiative)
+    }
+    #[cfg(not(feature = "nnue"))]
+    {
+        eval::eval_impl::handcrafted_evaluate(board, side, initiative)
+    }
 }
 
 // =============================================================================
