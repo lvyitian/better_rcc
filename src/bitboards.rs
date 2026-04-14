@@ -51,6 +51,7 @@ fn init_chariot_rays() -> ([[u128; 4]; BOARD_SQ_COUNT], [[u128; 4]; BOARD_SQ_COU
         let y = (sq / 9) as i8;
 
         // Direction 0: North (+y, toward y=9)
+        // Sets bits near→far: 54,63,72,81 → lsb_index = nearest (54)
         let mut mask = 0u128;
         let mut ny = y + 1;
         while ny < 10 {
@@ -62,6 +63,7 @@ fn init_chariot_rays() -> ([[u128; 4]; BOARD_SQ_COUNT], [[u128; 4]; BOARD_SQ_COU
         chariot_rays[sq][0] = mask;
 
         // Direction 1: South (-y, toward y=0)
+        // Sets bits far→near: 36,27,18,9,0 → lsb_index = furthest (0), msb_index = nearest (36)
         mask = 0u128;
         let mut ny = y - 1;
         while ny >= 0 {
@@ -73,6 +75,7 @@ fn init_chariot_rays() -> ([[u128; 4]; BOARD_SQ_COUNT], [[u128; 4]; BOARD_SQ_COU
         chariot_rays[sq][1] = mask;
 
         // Direction 2: East (+x, toward x=8)
+        // Sets bits near→far: 46,47,48 → lsb_index = nearest (46)
         mask = 0u128;
         let mut nx = x + 1;
         while nx < 9 {
@@ -84,6 +87,7 @@ fn init_chariot_rays() -> ([[u128; 4]; BOARD_SQ_COUNT], [[u128; 4]; BOARD_SQ_COU
         chariot_rays[sq][2] = mask;
 
         // Direction 3: West (-x, toward x=0)
+        // Sets bits far→near: 44,43,42... → lsb_index = furthest, msb_index = nearest
         mask = 0u128;
         let mut nx = x - 1;
         while nx >= 0 {
@@ -170,6 +174,8 @@ impl Bitboards {
         for pt in 0..7 {
             for c in 0..2 {
                 if self.pieces[pt][c] & bb != 0 {
+                    // Safety: pt is always 0-6 (valid PieceType discriminants) due to loop bounds
+                    debug_assert!(pt < 7, "Invalid piece type index {}", pt);
                     return Some(Piece {
                         color: if c == 0 { Color::Red } else { Color::Black },
                         piece_type: unsafe { std::mem::transmute::<u8, PieceType>(pt as u8) },
@@ -251,7 +257,14 @@ impl Bitboards {
             if blockers == 0 {
                 attacks |= ray;  // Clear path — all squares reachable
             } else {
-                let nearest = Self::lsb_index(blockers);
+                // FIX: Nearest piece depends on direction:
+                // - North/East: nearest = smallest square = lsb_index
+                // - South/West: nearest = largest square = msb_index
+                let nearest = if dir % 2 == 0 {
+                    Self::lsb_index(blockers)  // North or East
+                } else {
+                    Self::msb_index(blockers)   // South or West
+                };
                 // Only include squares up to nearest if it is NOT our piece
                 if occ_color & (1_u128 << nearest) == 0 {
                     let ray_to_nearest = ray & !(rays[nearest as usize][dir]);
@@ -277,14 +290,30 @@ impl Bitboards {
                 // No screen, no captures - all squares along ray are empty (already in ray)
                 attacks |= ray;
             } else {
-                let nearest = Self::lsb_index(blockers);
-                // Quiet moves: all empty squares before (not including) the screen
-                let quiet_ray = ray & !(rays[nearest as usize][dir]);
+                // FIX: Nearest screen depends on direction:
+                // - North/East: nearest = smallest square = lsb_index
+                // - South/West: nearest = largest square = msb_index
+                let nearest = if dir % 2 == 0 {
+                    Self::lsb_index(blockers)  // North or East
+                } else {
+                    Self::msb_index(blockers)   // South or West
+                };
+                // Quiet moves: squares BEFORE the screen (empty squares only, not including screen or beyond)
+                // rays[nearest] = squares BEYOND nearest
+                // Also exclude occupied squares (both own and enemy)
+                let quiet_ray = ray & !(rays[nearest as usize][dir]) & !occ;
                 attacks |= quiet_ray;
 
-                let second_blockers = ray & occ & !(rays[nearest as usize][dir]);
+                // Capture: squares BEYOND the screen that are occupied by enemy
+                // (blockers in the ray beyond the nearest screen)
+                let second_blockers = ray & occ & rays[nearest as usize][dir];
                 if second_blockers != 0 {
-                    let second = Self::lsb_index(second_blockers);
+                    // Second blocker: same direction logic (it's the nearest remaining blocker)
+                    let second = if dir % 2 == 0 {
+                        Self::lsb_index(second_blockers)
+                    } else {
+                        Self::msb_index(second_blockers)
+                    };
                     // Capture only if target is NOT our own piece
                     if occ_color & (1_u128 << second) == 0 {
                         attacks |= 1_u128 << second;
@@ -446,7 +475,7 @@ impl Bitboards {
     }
 
     /// Pawn attacks from sq for the given color.
-    /// Returns attack squares (forward + side if crossed river).
+    /// Returns attack DESTINATION squares — where this pawn can attack.
     /// Filters out own-occupied destination squares.
     pub fn pawn_attacks(&self, sq: u8, color: Color) -> u128 {
         let x = (sq % 9) as i8;
@@ -489,10 +518,15 @@ impl Bitboards {
         let mut attackers = 0u128;
 
         // Chariot attacks: slides in 4 directions, nearest piece in each direction
-        for ray in rays[target as usize].iter().take(4) {
+        for (dir, ray) in rays[target as usize].iter().enumerate().take(4) {
             let blockers = ray & occ;
             if blockers == 0 { continue; }
-            let nearest = Self::lsb_index(blockers);
+            // FIX: Nearest depends on direction: North/East → lsb, South/West → msb
+            let nearest = if dir % 2 == 0 {
+                Self::lsb_index(blockers)  // North or East
+            } else {
+                Self::msb_index(blockers)   // South or West
+            };
             if occ_color & (1_u128 << nearest) != 0
                 && self.pieces[PieceType::Chariot as usize][color as usize] & (1_u128 << nearest) != 0
             {
@@ -504,7 +538,12 @@ impl Bitboards {
         for (dir, &ray) in rays[target as usize].iter().enumerate().take(4) {
             let blockers = ray & occ;
             if blockers == 0 { continue; }
-            let nearest = Self::lsb_index(blockers);
+            // FIX: Nearest screen depends on direction
+            let nearest = if dir % 2 == 0 {
+                Self::lsb_index(blockers)  // North or East
+            } else {
+                Self::msb_index(blockers)   // South or West
+            };
             if self.pieces[PieceType::Cannon as usize][color as usize] & (1_u128 << nearest) != 0 {
                 let second_blockers = ray & occ & !(rays[nearest as usize][dir]);
                 if second_blockers != 0 {
@@ -526,15 +565,40 @@ impl Bitboards {
             horse_bb &= horse_bb - 1;
         }
 
-        // Pawn attacks: pawns that can attack target
-        let pawn_attacks_bb = self.pawn_attacks(target, color);
-        let mut pawn_bb = pawn_attacks_bb & occ_color;
-        while pawn_bb != 0 {
-            let sq = Self::lsb_index(pawn_bb);
-            if self.pieces[PieceType::Pawn as usize][color as usize] & (1_u128 << sq) != 0 {
-                attackers |= 1_u128 << sq;
+        // Pawn attacks: find SOURCE positions where pawns can attack target
+        // For target at (tx, ty), pawn must be at:
+        // - Forward: (tx, ty - dir) = (ty - dir, tx) in code's (y, x) ordering
+        // - Side: (tx±1, ty) = (ty, tx±1) in code's (y, x) ordering
+        let tx = (target % 9) as i8;
+        let ty = (target / 9) as i8;
+        let dir: i8 = if color == Color::Red { -1 } else { 1 };
+
+        // Forward SOURCE: (ty - dir, tx)
+        let forward_y = ty - dir;
+        if forward_y >= 0 && forward_y < 10 {
+            let forward_sq = (forward_y * 9 + tx) as u8;
+            if occ_color & (1_u128 << forward_sq) != 0
+                && self.pieces[PieceType::Pawn as usize][color as usize] & (1_u128 << forward_sq) != 0
+            {
+                attackers |= 1_u128 << forward_sq;
             }
-            pawn_bb &= pawn_bb - 1;
+        }
+
+        // Side SOURCE: (ty, tx±1)
+        // Side attacks only after crossing river
+        let crossed = if color == Color::Red { ty <= 4 } else { ty >= 5 };
+        if crossed {
+            for dx in [-1, 1] {
+                let sx = tx + dx;
+                if (0..9).contains(&sx) {
+                    let side_sq = (ty * 9 + sx) as u8;
+                    if occ_color & (1_u128 << side_sq) != 0
+                        && self.pieces[PieceType::Pawn as usize][color as usize] & (1_u128 << side_sq) != 0
+                    {
+                        attackers |= 1_u128 << side_sq;
+                    }
+                }
+            }
         }
 
         // King attacks: 4 orthogonal moves
@@ -546,6 +610,30 @@ impl Bitboards {
                 attackers |= 1_u128 << sq;
             }
             king_bb &= king_bb - 1;
+        }
+
+        // Advisor attacks: iterate through all advisor squares and check if they attack target
+        let advisor_bb = self.pieces[PieceType::Advisor as usize][color as usize];
+        let mut tmp = advisor_bb;
+        while tmp != 0 {
+            let sq = Self::lsb_index(tmp);
+            let attacks_from_sq = self.advisor_attacks(sq, color);
+            if attacks_from_sq & (1_u128 << target) != 0 {
+                attackers |= 1_u128 << sq;
+            }
+            tmp &= tmp - 1;
+        }
+
+        // Elephant attacks: iterate through all elephant squares and check if they attack target
+        let elephant_bb = self.pieces[PieceType::Elephant as usize][color as usize];
+        let mut tmp = elephant_bb;
+        while tmp != 0 {
+            let sq = Self::lsb_index(tmp);
+            let attacks_from_sq = self.elephant_attacks(sq, color);
+            if attacks_from_sq & (1_u128 << target) != 0 {
+                attackers |= 1_u128 << sq;
+            }
+            tmp &= tmp - 1;
         }
 
         attackers
@@ -887,5 +975,597 @@ mod tests {
         let count = bb.count_non_king_pieces();
         // Initial position: 32 pieces total, 2 kings -> 30 non-kings
         assert_eq!(count, 30, "Initial position should have 30 non-king pieces");
+    }
+
+    // =============================================================================
+    // BUG 1: chariot_attacks — lsb_index gives wrong blocker for SOUTH/WEST directions
+    //
+    // Root cause: init_chariot_rays sets bits in direction-dependent order:
+    //   North (+y): bits added near→far (54,63,72...), so lsb_index = nearest ✓
+    //   South (-y): bits added far→near (36,27,18,9,0...), so lsb_index = FURTHEST ✗
+    //   East  (+x): bits added near→far (46,47,48...), so lsb_index = nearest ✓
+    //   West  (-x): bits added far→near (44,43,42...), so lsb_index = FURTHEST ✗
+    // =============================================================================
+
+    /// Chariot at (4,5)=45 attacks SOUTH. Friendly at 36 (nearest), enemy at 27 (further).
+    /// Bug: lsb_index({36,27}) = 27 (the FURTHEST piece, not nearest!)
+    /// Expected: friendly at 36 blocks → no attack squares south
+    #[test]
+    fn test_chariot_attacks_south_blocked_by_nearest() {
+        let mut bb = Bitboards::new();
+        // Red chariot at (4,5) = 45
+        bb.pieces[PieceType::Chariot as usize][Color::Red as usize] = 1_u128 << 45;
+        // Red friendly pawn at (4,4) = 36 (one square south — nearest blocker)
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 36;
+        // Black enemy pawn at (4,3) = 27 (two squares south — beyond friendly)
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 27;
+
+        let attacks = bb.chariot_attacks(45, Color::Red);
+
+        // Friendly at 36 should block completely — nothing south of it reachable
+        assert_eq!(attacks & (1_u128 << 36), 0,
+            "Friendly at 36 should block — no attack south");
+        assert_eq!(attacks & (1_u128 << 27), 0,
+            "Enemy at 27 should NOT be attacked (blocked by friendly at 36)");
+    }
+
+    /// Chariot at (4,5)=45 attacks WEST. Friendly at 44 (nearest), enemy at 43 (further).
+    /// Bug: lsb_index({44,43}) = 43 (the FURTHEST piece, not nearest!)
+    /// Expected: friendly at 44 blocks → no attack squares west
+    #[test]
+    fn test_chariot_attacks_west_blocked_by_nearest() {
+        let mut bb = Bitboards::new();
+        // Red chariot at (4,5) = 45
+        bb.pieces[PieceType::Chariot as usize][Color::Red as usize] = 1_u128 << 45;
+        // Red friendly at (3,5) = 44 (one square west — nearest blocker)
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 44;
+        // Black enemy at (2,5) = 43 (two squares west)
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 43;
+
+        let attacks = bb.chariot_attacks(45, Color::Red);
+
+        // Friendly at 44 should block — nothing west reachable
+        assert_eq!(attacks & (1_u128 << 44), 0,
+            "Friendly at 44 should block — no attack west");
+        assert_eq!(attacks & (1_u128 << 43), 0,
+            "Enemy at 43 should NOT be attacked (blocked by friendly at 44)");
+    }
+
+    /// Chariot at (4,5)=45 attacks NORTH — this direction works correctly (near-to-far).
+    #[test]
+    fn test_chariot_attacks_north_blocked_correctly() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Chariot as usize][Color::Red as usize] = 1_u128 << 45;
+        // Red friendly at (4,6) = 54 (one square north — nearest blocker)
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 54;
+        // Black enemy at (4,7) = 63 (two squares north)
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 63;
+
+        let attacks = bb.chariot_attacks(45, Color::Red);
+
+        // North: lsb_index correctly gives 54 (nearest), so it blocks properly
+        assert_eq!(attacks & (1_u128 << 54), 0, "Friendly at 54 should block north");
+        assert_eq!(attacks & (1_u128 << 63), 0, "Enemy at 63 blocked by friendly at 54");
+    }
+
+    /// Chariot at (4,5)=45 attacks EAST — this direction works correctly (near-to-far).
+    #[test]
+    fn test_chariot_attacks_east_blocked_correctly() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Chariot as usize][Color::Red as usize] = 1_u128 << 45;
+        // Red friendly at (5,5) = 46 (one square east — nearest blocker)
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 46;
+        // Black enemy at (6,5) = 47 (two squares east)
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 47;
+
+        let attacks = bb.chariot_attacks(45, Color::Red);
+
+        assert_eq!(attacks & (1_u128 << 46), 0, "Friendly at 46 should block east");
+        assert_eq!(attacks & (1_u128 << 47), 0, "Enemy at 47 blocked by friendly at 46");
+    }
+
+    /// Chariot at (4,5)=45 with no blockers — should reach all 17 squares.
+    #[test]
+    fn test_unblocked_chariot_has_17_destinations() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Chariot as usize][Color::Red as usize] = 1_u128 << 45;
+
+        let attacks = bb.chariot_attacks(45, Color::Red);
+        let count = attacks.count_ones();
+
+        // From (4,5): North has 4 squares (y=6,7,8,9),
+        // South has 5 squares (y=4,3,2,1,0),
+        // East has 4 squares (x=5,6,7,8),
+        // West has 4 squares (x=3,2,1,0) = 4+5+4+4 = 17
+        assert_eq!(count, 17, "Unblocked chariot at (4,5) should reach 17 squares, got {}", count);
+    }
+
+    // =============================================================================
+    // BUG 2: cannon_attacks — same lsb_index direction bug
+    // =============================================================================
+
+    /// Cannon at (4,5)=45 attacks SOUTH with screen at 36 and enemy at 27.
+    /// Bug: lsb_index({36,27}) = 27 incorrectly identifies the screen.
+    #[test]
+    fn test_cannon_attacks_south_one_screen_capture() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Cannon as usize][Color::Red as usize] = 1_u128 << 45;
+        // Red screen at (4,4) = 36 (one square south)
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 36;
+        // Black enemy at (4,3) = 27 (two squares south)
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 27;
+
+        let attacks = bb.cannon_attacks(45, Color::Red);
+
+        // Cannon with one screen should capture enemy at 27
+        assert_ne!(attacks & (1_u128 << 27), 0,
+            "Cannon should capture enemy at 27 with one screen at 36");
+    }
+
+    // =============================================================================
+    // BUG 3: attackers() — lsb_index direction bug + missing Advisor/Elephant
+    // =============================================================================
+
+    /// Black chariot at 27 (x=4,y=3) attacks north toward red at 45 — blocked by red at 36.
+    #[test]
+    fn test_attackers_chariot_north_blocked() {
+        let mut bb = Bitboards::new();
+        // Black chariot at (4,3) = 27
+        bb.pieces[PieceType::Chariot as usize][Color::Black as usize] = 1_u128 << 27;
+        // Red chariot at (4,5) = 45 (target)
+        bb.pieces[PieceType::Chariot as usize][Color::Red as usize] = 1_u128 << 45;
+        // Red pawn at (4,4) = 36 (blocks north attack from 27 to 45)
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 36;
+
+        let attackers = bb.attackers(45, Color::Black);
+
+        // Chariot at 27 looking north: ray = {36,45,54,...}, nearest = 36 (red) → blocks
+        assert_eq!(attackers & (1_u128 << 27), 0,
+            "Black chariot at 27 should NOT attack 45 (blocked by red at 36)");
+    }
+
+    /// Black chariot at 45 attacks south toward red at 27 — blocked by red at 36.
+    #[test]
+    fn test_attackers_chariot_south_blocked() {
+        let mut bb = Bitboards::new();
+        // Black chariot at (4,5) = 45
+        bb.pieces[PieceType::Chariot as usize][Color::Black as usize] = 1_u128 << 45;
+        // Red at (4,4) = 36 (blocks southward attack from 45 to 27)
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 36;
+        // Red at (4,3) = 27 (target)
+        bb.pieces[PieceType::Chariot as usize][Color::Red as usize] |= 1_u128 << 27;
+
+        let attackers = bb.attackers(27, Color::Black);
+
+        // Chariot at 45 looking south: ray = {36,27,18,...}, nearest = 36 (red) → blocks
+        assert_eq!(attackers & (1_u128 << 45), 0,
+            "Black chariot at 45 should NOT attack 27 (blocked by red at 36)");
+    }
+
+    /// Advisor attack should be detected by attackers()
+    #[test]
+    fn test_attackers_advisor() {
+        let mut bb = Bitboards::new();
+        // Black advisor at (5,2) = 23 (in black palace: y<=2)
+        bb.pieces[PieceType::Advisor as usize][Color::Black as usize] = 1_u128 << 23;
+        // Red pawn at (4,1) = 13 (diagonal from advisor — target)
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 13;
+
+        let attackers = bb.attackers(13, Color::Black);
+
+        // Black advisor at 23 should attack 13 (diagonal within palace)
+        // (5,2) → (4,1) is one diagonal step
+        // Bug: Advisor is NOT checked in attackers()
+        assert_ne!(attackers & (1_u128 << 23), 0,
+            "Black advisor at 23 should attack red pawn at 13");
+    }
+
+    /// Elephant attack should be detected by attackers()
+    #[test]
+    fn test_attackers_elephant() {
+        let mut bb = Bitboards::new();
+        // Black elephant at (2,0) = 18 (can move to (0,2)=2 via (-2,2), eye at (1,1)=10)
+        bb.pieces[PieceType::Elephant as usize][Color::Black as usize] = 1_u128 << 18;
+        // Red pawn at (0,2) = 2 (target square — diagonal from elephant)
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 2;
+
+        let attackers = bb.attackers(2, Color::Black);
+
+        // Black elephant at 18 should attack 2 (diagonal within black's side)
+        // Bug: Elephant is NOT checked in attackers()
+        assert_ne!(attackers & (1_u128 << 18), 0,
+            "Black elephant at 18 should attack red pawn at 2");
+    }
+
+    // =============================================================================
+    // Verify chariot rays storage
+    // =============================================================================
+
+    #[test]
+    fn test_chariot_rays_south_count() {
+        let rays = get_chariot_rays();
+        // For sq=45 (x=4, y=5), direction 1 (South): y=4,3,2,1,0 → 36,27,18,9,0 (5 squares)
+        let south = rays[45][1];
+        let count = south.count_ones();
+        assert_eq!(count, 5, "South ray from (4,5) should have 5 squares, got {}", count);
+    }
+
+    #[test]
+    fn test_chariot_rays_north_count() {
+        let rays = get_chariot_rays();
+        // For sq=45 (x=4, y=5), direction 0 (North): y=6,7,8,9 → 54,63,72,81 (4 squares)
+        let north = rays[45][0];
+        let count = north.count_ones();
+        assert_eq!(count, 4, "North ray from (4,5) should have 4 squares, got {}", count);
+    }
+
+    #[test]
+    fn test_chariot_rays_south_includes_correct_squares() {
+        let rays = get_chariot_rays();
+        let south = rays[45][1];
+        // Should include 36,27,18,9,0 but NOT 45
+        assert_ne!(south & (1_u128 << 36), 0);
+        assert_ne!(south & (1_u128 << 27), 0);
+        assert_ne!(south & (1_u128 << 18), 0);
+        assert_ne!(south & (1_u128 << 9), 0);
+        assert_ne!(south & (1_u128 << 0), 0);
+        assert_eq!(south & (1_u128 << 45), 0, "Source square 45 should not be in ray");
+    }
+
+    // =============================================================================
+    // generate_moves and generate_pseudo_moves
+    // =============================================================================
+
+    #[test]
+    fn test_generate_pseudo_moves_unblocked_chariot_count() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Chariot as usize][Color::Red as usize] = 1_u128 << 45;
+
+        let moves = bb.generate_pseudo_moves(Color::Red);
+
+        // From (4,5) on empty board: 4 north + 5 south + 4 east + 4 west = 17 moves
+        assert_eq!(moves.len(), 17, "Unblocked chariot should generate 17 pseudo-moves, got {}", moves.len());
+    }
+
+    #[test]
+    fn test_generate_moves_chariot_includes_captures() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Chariot as usize][Color::Red as usize] = 1_u128 << 45;
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 63;
+
+        let moves = bb.generate_moves(45, Color::Red);
+        let dsts: u128 = moves.iter().fold(0u128, |acc, &d| acc | (1_u128 << d));
+
+        // Should include 63 (enemy capture)
+        assert_ne!(dsts & (1_u128 << 63), 0, "Chariot should have enemy at 63 as destination");
+    }
+
+    // =============================================================================
+    // PAWN ATTACK TESTS (coordinate: (0,0) top-left, y increases down)
+    // =============================================================================
+
+    /// Red pawn at (4,6)=58 advances toward y=0 (up/forward for Red)
+    /// Red dir=-1, so forward is y-1
+    #[test]
+    fn test_red_pawn_forward_attack() {
+        let mut bb = Bitboards::new();
+        // Red pawn at (4,6) = 4 + 6*9 = 58
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 58;
+
+        let attacks = bb.pawn_attacks(58, Color::Red);
+        // Forward: y-1=5, sq = 4 + 5*9 = 49
+        assert_ne!(attacks & (1_u128 << 49), 0,
+            "Red pawn at (4,6) should attack forward to (4,5)=49");
+    }
+
+    /// Black pawn at (4,3)=31 advances toward y=9 (down/forward for Black)
+    /// Black dir=+1, so forward is y+1
+    #[test]
+    fn test_black_pawn_forward_attack() {
+        let mut bb = Bitboards::new();
+        // Black pawn at (4,3) = 4 + 3*9 = 31 (NOT 30!)
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 31;
+
+        let attacks = bb.pawn_attacks(31, Color::Black);
+        // Forward: y+1=4, sq = 4 + 4*9 = 40
+        assert_ne!(attacks & (1_u128 << 40), 0,
+            "Black pawn at (4,3) should attack forward to (4,4)=40");
+    }
+
+    /// Red pawn at y=5 (before river at y=4) should NOT have side attacks yet
+    /// Red crosses when y <= 4
+    #[test]
+    fn test_red_pawn_before_river_no_side() {
+        let mut bb = Bitboards::new();
+        // Red pawn at (4,5) = 4 + 5*9 = 49
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 49;
+
+        let attacks = bb.pawn_attacks(49, Color::Red);
+        // y=5 > 4, hasn't crossed river yet - only forward (to y=4)
+        assert_eq!(attacks.count_ones(), 1,
+            "Red pawn at y=5 should only have forward attack, no side");
+    }
+
+    /// Red pawn at y=4 (AT river, has crossed) should have side attacks
+    #[test]
+    fn test_red_pawn_at_river_has_side() {
+        let mut bb = Bitboards::new();
+        // Red pawn at (4,4) = 4 + 4*9 = 40
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 40;
+
+        let attacks = bb.pawn_attacks(40, Color::Red);
+        // y=4 <= 4, has crossed - forward to y=3 + side to x=3,5
+        // Forward: (4,3)=31, Side: (3,4)=37, (5,4)=41
+        assert!(attacks.count_ones() >= 2,
+            "Red pawn at y=4 should have forward + side attacks");
+    }
+
+    /// Black pawn at y=4 (before river at y=5) should NOT have side attacks yet
+    /// Black crosses when y >= 5
+    #[test]
+    fn test_black_pawn_before_river_no_side() {
+        let mut bb = Bitboards::new();
+        // Black pawn at (4,4) = 4 + 4*9 = 40
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 40;
+
+        let attacks = bb.pawn_attacks(40, Color::Black);
+        // y=4 < 5, hasn't crossed yet - only forward (to y=5)
+        assert_eq!(attacks.count_ones(), 1,
+            "Black pawn at y=4 should only have forward attack");
+    }
+
+    /// Black pawn at y=5 (AT river, has crossed) should have side attacks
+    #[test]
+    fn test_black_pawn_at_river_has_side() {
+        let mut bb = Bitboards::new();
+        // Black pawn at (4,5) = 4 + 5*9 = 49
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 49;
+
+        let attacks = bb.pawn_attacks(49, Color::Black);
+        // y=5 >= 5, has crossed - forward to y=6 + side
+        assert!(attacks.count_ones() >= 2,
+            "Black pawn at y=5 should have forward + side attacks");
+    }
+
+    // =============================================================================
+    // ELEPHANT ATTACK TESTS
+    // Red elephant at y>=5 stays on own side (cannot cross to y<=4)
+    // Black elephant at y<=4 stays on own side (cannot cross to y>=5)
+    // =============================================================================
+
+    /// Red elephant at (2,9)=83 can attack (4,7)=67 (y=7>4, on own side)
+    #[test]
+    fn test_red_elephant_attacks_own_side() {
+        let mut bb = Bitboards::new();
+        // Red elephant at (2,9) = 2 + 9*9 = 83
+        bb.pieces[PieceType::Elephant as usize][Color::Red as usize] = 1_u128 << 83;
+
+        let attacks = bb.elephant_attacks(83, Color::Red);
+        // (4,7)=4+7*9=67 has y=7 > 4, OK for Red
+        assert_ne!(attacks & (1_u128 << 67), 0,
+            "Red elephant at (2,9) should attack (4,7)");
+    }
+
+    /// Red elephant at (2,9)=83 cannot attack (4,3)=31 (y=3<=4, would cross river)
+    #[test]
+    fn test_red_elephant_cannot_cross_river() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Elephant as usize][Color::Red as usize] = 1_u128 << 83;
+
+        let attacks = bb.elephant_attacks(83, Color::Red);
+        // (4,3)=31 has y=3 <= 4, crosses river for Red
+        assert_eq!(attacks & (1_u128 << 31), 0,
+            "Red elephant should NOT attack (4,3) - crosses river");
+    }
+
+    /// Black elephant at (2,0)=2 can attack (4,2)=22 (y=2<5, on own side)
+    #[test]
+    fn test_black_elephant_attacks_own_side() {
+        let mut bb = Bitboards::new();
+        // Black elephant at (2,0) = 2 + 0*9 = 2
+        bb.pieces[PieceType::Elephant as usize][Color::Black as usize] = 1_u128 << 2;
+
+        let attacks = bb.elephant_attacks(2, Color::Black);
+        // (4,2)=22 has y=2 < 5, OK for Black
+        assert_ne!(attacks & (1_u128 << 22), 0,
+            "Black elephant at (2,0) should attack (4,2)");
+    }
+
+    /// Black elephant at (2,0)=2 cannot attack (4,6)=58 (y=6>=5, would cross)
+    #[test]
+    fn test_black_elephant_cannot_cross_river() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Elephant as usize][Color::Black as usize] = 1_u128 << 2;
+
+        let attacks = bb.elephant_attacks(2, Color::Black);
+        // (4,6)=58 has y=6 >= 5, crosses river for Black
+        assert_eq!(attacks & (1_u128 << 58), 0,
+            "Black elephant should NOT attack (4,6) - crosses river");
+    }
+
+    /// Elephant eye must be empty - blocking one direction still leaves others
+    #[test]
+    fn test_elephant_eye_blocked() {
+        let mut bb = Bitboards::new();
+        // Red elephant at (2,9)=83
+        bb.pieces[PieceType::Elephant as usize][Color::Red as usize] = 1_u128 << 83;
+        // Block BOTH valid eyes to fully block the elephant:
+        // Eye (3,8)=75 for delta (+2,-2) → target (4,7)
+        // Eye (1,8)=73 for delta (-2,-2) → target (0,7)
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = (1_u128 << 75) | (1_u128 << 73);
+
+        let attacks = bb.elephant_attacks(83, Color::Red);
+        assert_eq!(attacks, 0,
+            "Elephant with both valid eyes blocked should have no attacks");
+    }
+
+    // =============================================================================
+    // ADVISOR ATTACK TESTS
+    // Red palace: y>=7, Black palace: y<=2
+    // =============================================================================
+
+    /// Red advisor at (3,7)=66 can attack (4,8)=76 (y=8>=7, in palace)
+    #[test]
+    fn test_red_advisor_in_palace() {
+        let mut bb = Bitboards::new();
+        // Red advisor at (3,7) = 3 + 7*9 = 66
+        bb.pieces[PieceType::Advisor as usize][Color::Red as usize] = 1_u128 << 66;
+
+        let attacks = bb.advisor_attacks(66, Color::Red);
+        // (4,8)=76 has y=8 >= 7, in palace
+        assert_ne!(attacks & (1_u128 << 76), 0,
+            "Red advisor at (3,7) should attack (4,8)");
+    }
+
+    /// Red advisor at (3,7)=66 cannot attack (4,6)=58 (y=6<7, out of palace)
+    #[test]
+    fn test_red_advisor_out_of_palace() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Advisor as usize][Color::Red as usize] = 1_u128 << 66;
+
+        let attacks = bb.advisor_attacks(66, Color::Red);
+        // (4,6)=58 has y=6 < 7, out of palace
+        assert_eq!(attacks & (1_u128 << 58), 0,
+            "Red advisor should NOT attack (4,6) - out of palace");
+    }
+
+    /// Black advisor at (4,2)=22 can attack (5,3)=32 (y=3<=2? No! y=3>2)
+    /// Wait, (4,2) is NOT in black's palace (y=2, x=4). Black palace is y<=2, x=3-5
+    /// So (4,2) is at the edge. (5,3) has y=3 > 2, NOT in black's palace.
+    /// Let me use (5,2)=23 which IS in black's palace.
+    #[test]
+    fn test_black_advisor_in_palace() {
+        let mut bb = Bitboards::new();
+        // Black advisor at (5,2) = 5 + 2*9 = 23
+        bb.pieces[PieceType::Advisor as usize][Color::Black as usize] = 1_u128 << 23;
+
+        let attacks = bb.advisor_attacks(23, Color::Black);
+        // (4,3)=31 has y=3 > 2, NOT in palace. (4,1)=13 is in palace.
+        assert_ne!(attacks & (1_u128 << 13), 0,
+            "Black advisor at (5,2) should attack (4,1)");
+    }
+
+    // =============================================================================
+    // KING ATTACK TESTS
+    // =============================================================================
+
+    /// Red king at (4,7)=67 can attack (4,8)=76 (y=8>=7, in palace)
+    #[test]
+    fn test_red_king_in_palace() {
+        let mut bb = Bitboards::new();
+        // Red king at (4,7) = 4 + 7*9 = 67
+        bb.pieces[PieceType::King as usize][Color::Red as usize] = 1_u128 << 67;
+
+        let attacks = bb.king_attacks(67, Color::Red);
+        assert_ne!(attacks & (1_u128 << 76), 0,
+            "Red king at (4,7) should attack (4,8)");
+    }
+
+    /// Red king at (4,7)=67 cannot attack (4,6)=58 (y=6<7, out of palace)
+    #[test]
+    fn test_red_king_out_of_palace() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::King as usize][Color::Red as usize] = 1_u128 << 67;
+
+        let attacks = bb.king_attacks(67, Color::Red);
+        assert_eq!(attacks & (1_u128 << 58), 0,
+            "Red king should NOT attack (4,6) - out of palace");
+    }
+
+    /// Black king at (4,2)=22 can attack (4,1)=13 (y=1<=2, in palace)
+    #[test]
+    fn test_black_king_in_palace() {
+        let mut bb = Bitboards::new();
+        // Black king at (4,2) = 4 + 2*9 = 22
+        bb.pieces[PieceType::King as usize][Color::Black as usize] = 1_u128 << 22;
+
+        let attacks = bb.king_attacks(22, Color::Black);
+        assert_ne!(attacks & (1_u128 << 13), 0,
+            "Black king at (4,2) should attack (4,1)");
+    }
+
+    // =============================================================================
+    // CANNON ATTACK TESTS
+    // =============================================================================
+
+    /// Cannon with no screen cannot capture
+    #[test]
+    fn test_cannon_no_screen_no_capture() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Cannon as usize][Color::Red as usize] = 1_u128 << 45;
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 63;
+
+        let attacks = bb.cannon_attacks(45, Color::Red);
+        // No screen in north direction, so no capture
+        assert_eq!(attacks & (1_u128 << 63), 0,
+            "Cannon with no screen should not capture");
+    }
+
+    /// Cannon with exactly one screen CAN capture
+    #[test]
+    fn test_cannon_one_screen_capture() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Cannon as usize][Color::Red as usize] = 1_u128 << 45;
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 54; // screen
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 63; // target
+
+        let attacks = bb.cannon_attacks(45, Color::Red);
+        assert_ne!(attacks & (1_u128 << 63), 0,
+            "Cannon with one screen should capture");
+    }
+
+    /// Cannon with two screens cannot capture
+    #[test]
+    fn test_cannon_two_screens_no_capture() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Cannon as usize][Color::Red as usize] = 1_u128 << 45;
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 54; // screen 1
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] |= 1_u128 << 63; // screen 2
+
+        let attacks = bb.cannon_attacks(45, Color::Red);
+        // With 2 screens, no capture in that direction
+        assert_eq!(attacks & (1_u128 << 72), 0,
+            "Cannon with two screens should not capture");
+    }
+
+    // =============================================================================
+    // APPLY_MOVE / UNDO_MOVE TESTS
+    // =============================================================================
+
+    #[test]
+    fn test_apply_undo_preserves_position() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Chariot as usize][Color::Red as usize] = 1_u128 << 45;
+
+        let before = bb.pieces;
+        bb.apply_move(45, 54, None, Piece { color: Color::Red, piece_type: PieceType::Chariot });
+
+        assert_eq!(bb.pieces[PieceType::Chariot as usize][Color::Red as usize] & (1_u128 << 45), 0,
+            "Chariot should be removed from 45");
+        assert_ne!(bb.pieces[PieceType::Chariot as usize][Color::Red as usize] & (1_u128 << 54), 0,
+            "Chariot should be at 54");
+
+        bb.undo_move(45, 54, None, Piece { color: Color::Red, piece_type: PieceType::Chariot });
+        assert_eq!(bb.pieces, before,
+            "After undo, bitboards should be exactly restored");
+    }
+
+    #[test]
+    fn test_apply_undo_capture_restores() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Chariot as usize][Color::Red as usize] = 1_u128 << 45;
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 54;
+
+        let before = bb.pieces;
+        bb.apply_move(45, 54, Some(Piece { color: Color::Black, piece_type: PieceType::Pawn }),
+                    Piece { color: Color::Red, piece_type: PieceType::Chariot });
+
+        assert_eq!(bb.pieces[PieceType::Pawn as usize][Color::Black as usize], 0,
+            "Black pawn should be captured");
+
+        bb.undo_move(45, 54, Some(Piece { color: Color::Black, piece_type: PieceType::Pawn }),
+                    Piece { color: Color::Red, piece_type: PieceType::Chariot });
+        assert_eq!(bb.pieces, before,
+            "After undo, captured piece should be restored");
     }
 }
