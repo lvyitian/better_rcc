@@ -49,8 +49,6 @@ burn-nn = ["burn"]
 burn-optim = ["burn"]
 burn-derive = ["burn"]
 
-rustflags = ["-C", "llvm-args=-ffast-math"]
-
 [profile.dev]
 opt-level = 3
 debug = false
