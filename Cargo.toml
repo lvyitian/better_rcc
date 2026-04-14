@@ -48,3 +48,14 @@ burn-autodiff = ["burn"]
 burn-nn = ["burn"]
 burn-optim = ["burn"]
 burn-derive = ["burn"]
+
+[profile.dev]
+opt-level = 3
+debug = false
+lto = true
+fast-math = true
+
+[profile.release]
+opt-level = 3
+lto = true
+fast-math = true
