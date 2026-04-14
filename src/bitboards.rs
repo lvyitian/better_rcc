@@ -6,28 +6,12 @@
 //! Bit index formula: `sq = y * 9 + x` where x=0-8, y=0-9
 
 #[allow(dead_code)]
-use crate::{Action, Board, Color, Piece, PieceType, Coord};
+use crate::{Color, Piece, PieceType, Coord};
 use smallvec::SmallVec;
 use std::sync::OnceLock;
 
 /// Number of squares on the Xiangqi board
 pub const BOARD_SQ_COUNT: usize = 90;
-
-/// Mask of core area squares: x∈[3,5], y∈[3,6] (x=3,4,5; y=3,4,5,6)
-pub const CORE_AREA_MASK: u128 = {
-    let mut mask = 0u128;
-    let mut y = 3;
-    while y <= 6 {
-        let mut x = 3;
-        while x <= 5 {
-            let sq = (y * 9 + x) as u8;
-            mask |= 1_u128 << sq;
-            x += 1;
-        }
-        y += 1;
-    }
-    mask
-};
 
 /// Convert board Coord to bitboard square index (0-89)
 #[inline(always)]
@@ -373,11 +357,9 @@ impl Bitboards {
         attacks
     }
 
-    /// Cannon attacks from sq — slides, returns empty squares and captures (enemy beyond 1 screen).
-    /// Excludes own-occupied squares from both quiet and capture destinations.
-    pub fn cannon_attacks(&self, sq: u8, color: Color) -> u128 {
+    /// Cannon attacks from sq — slides until first screen, then captures through it.
+    pub fn cannon_attacks(&self, sq: u8, _color: Color) -> u128 {
         let occ = self.occupied_all();
-        let occ_color = self.occupied(color);
         let rays = get_chariot_rays();
         let mut attacks = 0u128;
 
@@ -385,196 +367,51 @@ impl Bitboards {
             let ray = rays[sq as usize][dir];
             let blockers = ray & occ;
             if blockers == 0 {
-                // No pieces in the way — all squares are empty, so the whole ray is quiet moves
-                attacks |= ray;
+                // No screen, no captures
             } else {
                 let nearest = Self::lsb_index(blockers);
-                // Quiet moves: all squares before (not including) the screen
-                // Must also exclude nearest itself since rays[nearest][dir] only has squares beyond nearest
-                attacks |= ray & !(rays[nearest as usize][dir] | (1_u128 << nearest));
-
-                // Capture: need exactly one screen and one target beyond it
-                // rays[nearest][dir] only has squares BEYOND nearest, not nearest itself
-                // So we must explicitly exclude nearest from the "beyond screen" check
-                let second_blockers = ray & occ & !(rays[nearest as usize][dir] | (1_u128 << nearest));
+                let second_blockers = ray & occ & !(rays[nearest as usize][dir]);
                 if second_blockers != 0 {
                     let second = Self::lsb_index(second_blockers);
-                    // Capture only if target is NOT our own piece
-                    if occ_color & (1_u128 << second) == 0 {
-                        attacks |= 1_u128 << second;  // Capture = landing on target square
-                    }
+                    let capture_ray = ray & !(rays[second as usize][dir]);
+                    attacks |= capture_ray;
                 }
             }
         }
         attacks
     }
 
-    /// Horse attacks from sq — 8 L-shape destinations, knee square must be empty.
-    /// Returns empty or enemy-capturable squares.
-    pub fn horse_attacks(&self, sq: u8, color: Color) -> u128 {
-        let x = (sq % 9) as i8;
-        let y = (sq / 9) as i8;
-        let occ = self.occupied_all();
-        let occ_color = self.occupied(color);
-
-        let horse_deltas: [(i8, i8); 8] = [
-            (2, 1), (2, -1), (-2, 1), (-2, -1),
-            (1, 2), (1, -2), (-1, 2), (-1, -2)
-        ];
-        let horse_blocks: [(i8, i8); 8] = [
-            (1, 0), (1, 0), (-1, 0), (-1, 0),
-            (0, 1), (0, -1), (0, 1), (0, -1)
-        ];
-
-        let mut attacks = 0u128;
-        for i in 0..8 {
-            let (dx, dy) = horse_deltas[i];
-            let (bx, by) = horse_blocks[i];
-            let tar_x = x + dx;
-            let tar_y = y + dy;
-            let knee_x = x + bx;
-            let knee_y = y + by;
-
-            // Knee must be on board and empty
-            if !(0..9).contains(&knee_x) || !(0..10).contains(&knee_y) {
-                continue;
-            }
-            let knee_sq = (knee_y * 9 + knee_x) as u8;
-            if occ & (1_u128 << knee_sq) != 0 {
-                continue; // knee is blocked
-            }
-
-            // Target must be on board
-            if !(0..9).contains(&tar_x) || !(0..10).contains(&tar_y) {
-                continue;
-            }
-
-            let tar_sq = (tar_y * 9 + tar_x) as u8;
-            // Target must not be own-occupied
-            if occ_color & (1_u128 << tar_sq) != 0 {
-                continue;
-            }
-
-            attacks |= 1_u128 << tar_sq;
-        }
-        attacks
+    /// Horse attacks from sq — 8 L-shape destinations (knee square unchecked by this function).
+    pub fn horse_attacks(&self, sq: u8, _color: Color) -> u128 {
+        get_horse_attacks()[sq as usize].iter().fold(0u128, |acc, &m| acc | m)
     }
 
-    /// Advisor attacks from sq — 4 diagonal destinations, palace-bound.
-    /// Returns empty or enemy-capturable squares.
-    pub fn advisor_attacks(&self, sq: u8, color: Color) -> u128 {
-        let x = (sq % 9) as i8;
-        let y = (sq / 9) as i8;
-        let occ_color = self.occupied(color);
-
-        let deltas = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
-        let mut attacks = 0u128;
-        for (dx, dy) in deltas {
-            let tx = x + dx;
-            let ty = y + dy;
-            let target = Coord::new(tx, ty);
-            // Palace bounds check
-            if !target.is_valid() || !target.in_palace(color) {
-                continue;
-            }
-            let tsq = (ty * 9 + tx) as u8;
-            if occ_color & (1_u128 << tsq) == 0 {
-                attacks |= 1_u128 << tsq;
-            }
-        }
-        attacks
+    /// Advisor attacks from sq — 4 diagonal destinations (palace-bound checked by caller).
+    pub fn advisor_attacks(&self, sq: u8, _color: Color) -> u128 {
+        get_advisor_attacks()[sq as usize].iter().fold(0u128, |acc, &m| acc | m)
     }
 
-    /// Elephant attacks from sq — 4 diagonal destinations, eye must be empty, cannot cross river.
-    /// Returns empty or enemy-capturable squares.
-    pub fn elephant_attacks(&self, sq: u8, color: Color) -> u128 {
-        let x = (sq % 9) as i8;
-        let y = (sq / 9) as i8;
-        let occ_color = self.occupied(color);
-        let occ_all = self.occupied_all();
-
-        let deltas = [(2, 2), (2, -2), (-2, 2), (-2, -2)];
-        let blocks = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
-        let mut attacks = 0u128;
-        for i in 0..4 {
-            let (dx, dy) = deltas[i];
-            let (bx, by) = blocks[i];
-            let tx = x + dx;
-            let ty = y + dy;
-            let bx = x + bx;
-            let by = y + by;
-
-            // Eye square must be on board and empty
-            if (0..9).contains(&bx) && (0..10).contains(&by) {
-                let eye_sq = (by * 9 + bx) as u8;
-                if occ_all & (1_u128 << eye_sq) != 0 {
-                    continue; // eye is blocked
-                }
-            } else {
-                continue; // eye off board
-            }
-
-            // Target must be on board
-            if !(0..9).contains(&tx) || !(0..10).contains(&ty) {
-                continue;
-            }
-
-            // River check: elephant cannot cross
-            let target_coord = Coord::new(tx, ty);
-            if target_coord.crosses_river(color) {
-                continue;
-            }
-
-            let tsq = (ty * 9 + tx) as u8;
-            // Target must not be own-occupied
-            if occ_color & (1_u128 << tsq) == 0 {
-                attacks |= 1_u128 << tsq;
-            }
-        }
-        attacks
+    /// Elephant attacks from sq — 4 diagonal destinations (river-bound checked by caller).
+    pub fn elephant_attacks(&self, sq: u8, _color: Color) -> u128 {
+        get_elephant_attacks()[sq as usize].iter().fold(0u128, |acc, &m| acc | m)
     }
 
-    /// King attacks from sq — 4 orthogonal destinations, palace-bound.
-    /// Filters out own-occupied destination squares.
-    pub fn king_attacks(&self, sq: u8, color: Color) -> u128 {
-        let x = (sq % 9) as i8;
-        let y = (sq / 9) as i8;
-        let occ_color = self.occupied(color);
-
-        let offsets = [(0, 1), (0, -1), (1, 0), (-1, 0)];
-        let mut attacks = 0u128;
-        for (dx, dy) in offsets {
-            let tx = x + dx;
-            let ty = y + dy;
-            let target = Coord::new(tx, ty);
-            // Palace bounds check
-            if !target.is_valid() || !target.in_palace(color) {
-                continue;
-            }
-            let tsq = (ty * 9 + tx) as u8;
-            if occ_color & (1_u128 << tsq) == 0 {
-                attacks |= 1_u128 << tsq;
-            }
-        }
-        attacks
+    /// King attacks from sq — 4 orthogonal destinations (palace-bound checked by caller).
+    pub fn king_attacks(&self, sq: u8, _color: Color) -> u128 {
+        get_king_attacks()[sq as usize]
     }
 
     /// Pawn attacks from sq for the given color.
     /// Returns attack squares (forward + side if crossed river).
-    /// Filters out own-occupied destination squares.
     pub fn pawn_attacks(&self, sq: u8, color: Color) -> u128 {
         let x = (sq % 9) as i8;
         let y = (sq / 9) as i8;
         let dir: i8 = if color == Color::Red { -1 } else { 1 };
-        let occ_color = self.occupied(color);
         let mut attacks = 0u128;
 
         let forward_sq = (y + dir, x);
         if forward_sq.0 >= 0 && forward_sq.0 < 10 {
-            let fsq = (forward_sq.0 * 9 + forward_sq.1) as u8;
-            if occ_color & (1_u128 << fsq) == 0 {
-                attacks |= 1_u128 << fsq;
-            }
+            attacks |= 1_u128 << (forward_sq.0 * 9 + forward_sq.1) as u8;
         }
 
         // Side moves only after crossing river
@@ -583,10 +420,7 @@ impl Bitboards {
             for dx in [-1, 1] {
                 let sx = x + dx;
                 if (0..9).contains(&sx) {
-                    let ssq = (y * 9 + sx) as u8;
-                    if occ_color & (1_u128 << ssq) == 0 {
-                        attacks |= 1_u128 << ssq;
-                    }
+                    attacks |= 1_u128 << (y * 9 + sx) as u8;
                 }
             }
         }
@@ -721,30 +555,6 @@ impl Bitboards {
                 moves.push((from, dst, captured));
             }
             bb &= bb - 1; // Clear LSB
-        }
-        moves
-    }
-
-    /// Generate all pseudo-legal moves for a color, returning Action structs.
-    /// Iterates occupied squares via bitboards, calls generate_moves for destinations.
-    pub fn generate_pseudo_moves_bitboards(board: &Board, color: Color) -> SmallVec<[Action; 32]> {
-        let mut moves = SmallVec::new();
-        let bitboards = &board.bitboards;
-        let mut occ = bitboards.occupied(color);
-
-        while occ != 0 {
-            let from_sq = Self::lsb_index(occ);
-            let from_coord = coord_from_sq(from_sq);
-            // piece is guaranteed to exist since we're iterating occupied squares
-            let _piece = bitboards.piece_at(from_sq).unwrap();
-
-            for dst_sq in bitboards.generate_moves(from_sq, color) {
-                let tar_coord = coord_from_sq(dst_sq);
-                let captured = bitboards.piece_at(dst_sq); // None if empty, Some(enemy) if capture
-                moves.push(Action::new(from_coord, tar_coord, captured));
-            }
-
-            occ &= occ - 1; // clear LSB
         }
         moves
     }
@@ -942,7 +752,7 @@ mod tests {
         let moves = movegen::generate_legal_moves(&mut board, Color::Red);
 
         if let Some(first_move) = moves.first() {
-            let action = first_move.clone();
+            let action = *first_move;
 
             // Before move: bitboards should match cells
             let bb_before = Bitboards::from_cells(&board.cells());
@@ -966,7 +776,7 @@ mod tests {
             }
 
             // Undo and verify
-            board.undo_move();
+            board.undo_move(action);
             let bb_after_undo = Bitboards::from_cells(&board.cells());
             for y in 0..10 {
                 for x in 0..9 {
@@ -1003,7 +813,7 @@ mod tests {
             let moves = generate_legal_moves(&mut board2, side);
             if moves.is_empty() { break; }
             let idx = (board2.zobrist_key as usize % moves.len());
-            board2.make_move(moves[idx].clone());
+            board2.make_move(moves[idx]);
         }
 
         let bb2 = &board2.bitboards;
@@ -1024,33 +834,5 @@ mod tests {
         let count = bb.count_non_king_pieces();
         // Initial position: 32 pieces total, 2 kings -> 30 non-kings
         assert_eq!(count, 30, "Initial position should have 30 non-king pieces");
-    }
-
-    #[test]
-    fn test_movegen_bb_matches_movegen_on_initial_position() {
-        use crate::movegen;
-        let board = Board::new(RuleSet::Official, 1);
-
-        let old_moves = movegen::generate_pseudo_moves(&board, Color::Red);
-        let new_moves = Bitboards::generate_pseudo_moves_bitboards(&board, Color::Red);
-
-        assert_eq!(old_moves.len(), new_moves.len(), "Move counts differ for Red on initial position");
-        for action in &new_moves {
-            assert!(old_moves.contains(action), "New movegen produced move not in old: {:?}", action);
-        }
-        for action in &old_moves {
-            assert!(new_moves.contains(action), "Old movegen produced move not in new: {:?}", action);
-        }
-
-        // Also test Black
-        let old_moves_black = movegen::generate_pseudo_moves(&board, Color::Black);
-        let new_moves_black = Bitboards::generate_pseudo_moves_bitboards(&board, Color::Black);
-        assert_eq!(old_moves_black.len(), new_moves_black.len());
-        for action in &new_moves_black {
-            assert!(old_moves_black.contains(action), "New movegen produced move not in old for Black: {:?}", action);
-        }
-        for action in &old_moves_black {
-            assert!(new_moves_black.contains(action), "Old movegen produced move not in new for Black: {:?}", action);
-        }
     }
 }

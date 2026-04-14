@@ -5,8 +5,6 @@ use crate::{Board, Color, Coord, PieceType, MATE_SCORE};
 #[allow(unused_imports)]
 use crate::RuleSet;
 use crate::eval::eval_impl::{handcrafted_evaluate, game_phase};
-#[allow(unused_imports)]
-use crate::nnue_state::{nnue_cache_get, nnue_cache_insert};
 #[cfg(feature = "train")]
 use burn::prelude::*;
 #[cfg(feature = "train")]
@@ -181,7 +179,7 @@ use crate::nnue_input::{INPUT_DIM, FT_DIM, NUM_BUCKETS, QA, QB, SCALE, bucket_in
 
 /// Feature transform output: 1024 i16 values, cache-line aligned for SIMD.
 #[repr(C, align(64))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Accumulator {
     pub vals: [i16; FT_DIM],
 }
@@ -449,7 +447,7 @@ impl NNUEFeedForward {
     /// Compute accumulators for stm and ntm inputs.
     /// Each accumulator = ft_bias + sum over active features of ft_weights[feature].
     /// Result clamped to [0, QA] and stored as i16.
-    pub fn compute_accumulators(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM]) -> (Accumulator, Accumulator) {
+    fn compute_accumulators(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM]) -> (Accumulator, Accumulator) {
         let mut stm_acc = Accumulator::zero();
         let mut ntm_acc = Accumulator::zero();
 
@@ -482,68 +480,57 @@ impl NNUEFeedForward {
         (stm_acc, ntm_acc)
     }
 
-    /// Internal helper: applies SCReLU and output layer to pre-computed accumulators.
-    /// `stm_acc` is the feature-transform accumulator for the side to move,
-    /// `ntm_acc` is for the opponent.
-    fn forward_from_accumulators(
-        &self,
-        stm_acc: &Accumulator,
-        ntm_acc: &Accumulator,
-        non_king_count: u8,
-    ) -> f32 {
-        let bucket_idx = bucket_index(non_king_count);
+    /// Forward pass returning raw f32 score.
+    /// `non_king_count` determines which bucket to use.
+    #[allow(dead_code)]
+    pub fn forward(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM], non_king_count: u8) -> f32 {
+        let (stm_acc, ntm_acc) = self.compute_accumulators(stm, ntm);
 
-        // SCReLU: clamp(x, 0, QA)² → i32, then concatenate [stm(1024), ntm(1024)]
+        // Apply SCReLU: clamp(0, QA)² → i32
+        // Then split and concatenate: [stm_acc(1024), ntm_acc(1024)] = 2048
         let mut combined = [0i32; FT_DIM * 2];
         for i in 0..FT_DIM {
             combined[i] = screlu(stm_acc.vals[i]);
             combined[FT_DIM + i] = screlu(ntm_acc.vals[i]);
         }
 
-        // Dot product with bucket's output weights
+        // Select bucket
+        let bucket_idx = bucket_index(non_king_count);
+
+        // Compute dot product: out_weights[bucket] · combined
+        // out_weights are QB quantized, combined is i32 (SCReLU result)
+        // combined[i] = screlu(acc[i]) where screlu returns [0, 65025] as i32
         let mut raw = 0i64;
         #[allow(clippy::needless_range_loop)]
         for i in 0..FT_DIM * 2 {
             raw += i64::from(self.out_weights[bucket_idx][i]) * i64::from(combined[i]);
         }
 
-        // Normalize and tanh
-        let qa_f = QA as f32;
+        // Spec formula: output = ((Σ/QA) + bias) * SCALE / (QA*QB) then tanh * SCALE
+        // Σ/QA reduces quantization from QA²·QB → QA·QB
+        // Bias is stored in QA*QB units, so no conversion needed when adding
+        let raw_f = raw as f32;
         let qb_f = QB as f32;
+        let qa_f = QA as f32;
         let scale_f = SCALE as f32;
-        let raw_result = ((raw as f32 / qa_f) + f32::from(self.out_bias[bucket_idx])) * scale_f / (qa_f * qb_f);
+
+        // Divide by QA first (reduces QA²·QB → QA·QB), then add bias (QA*QB units)
+        // Then apply tanh * SCALE to get final output in [-400, 400]
+        let raw_result = ((raw_f / qa_f) + f32::from(self.out_bias[bucket_idx])) * scale_f / (qa_f * qb_f);
         raw_result.tanh() * scale_f
     }
 
-    /// Forward pass returning raw f32 score.
-    /// `non_king_count` determines which bucket to use.
+    /// Forward pass returning NNOutput.
     #[allow(dead_code)]
-    pub fn forward(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM], non_king_count: u8) -> f32 {
-        let (stm_acc, ntm_acc) = self.compute_accumulators(stm, ntm);
-        self.forward_from_accumulators(&stm_acc, &ntm_acc, non_king_count)
-    }
-
-    /// Forward pass from pre-computed accumulators, returning full NNOutput.
-    fn forward_output_from_accumulators(
-        &self,
-        stm_acc: &Accumulator,
-        ntm_acc: &Accumulator,
-        non_king_count: u8,
-    ) -> NNOutput {
-        let score = self.forward_from_accumulators(stm_acc, ntm_acc, non_king_count);
+    pub fn forward_output(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM], non_king_count: u8) -> NNOutput {
+        let score = self.forward(stm, ntm, non_king_count);
+        // For NNUE, alpha=1.0, beta=0.0 (pure NN evaluation)
         NNOutput {
             alpha: 1.0,
             beta: 0.0,
             nn_score: score,
             correction: 0.0,
         }
-    }
-
-    /// Forward pass returning NNOutput.
-    #[allow(dead_code)]
-    pub fn forward_output(&self, stm: &[f32; INPUT_DIM], ntm: &[f32; INPUT_DIM], non_king_count: u8) -> NNOutput {
-        let (stm_acc, ntm_acc) = self.compute_accumulators(stm, ntm);
-        self.forward_output_from_accumulators(&stm_acc, &ntm_acc, non_king_count)
     }
 }
 
@@ -693,7 +680,7 @@ pub struct NNOutput {
 }
 
 /// Global NN instance, lazily initialized from file if present, random otherwise.
-pub static NN_NET: std::sync::LazyLock<NNUEFeedForward> =
+static NN_NET: std::sync::LazyLock<NNUEFeedForward> =
     std::sync::LazyLock::new(|| NNUEFeedForward::load_from_file("nn_weights.bin"));
 
 /// Hybrid NN + handcrafted evaluation.
@@ -706,48 +693,22 @@ pub static NN_NET: std::sync::LazyLock<NNUEFeedForward> =
 /// Where alpha, beta ∈ [0.05, 0.95] (sigmoid-clamped), nn_score ∈ [-400, 400],
 /// correction ∈ [-400, 400], handcrafted_score is in centipawns.
 #[allow(dead_code)]
-pub fn nn_evaluate_or_handcrafted(board: &mut Board, side: Color, initiative: bool) -> i32 {
+pub fn nn_evaluate_or_handcrafted(board: &Board, side: Color, initiative: bool) -> i32 {
     let handcrafted = handcrafted_evaluate(board, side, initiative);
 
-    // Compute NN output based on side and dirty flag
-    let output = if !board.nnue_state.dirty {
-        // Clean: use stored accumulators directly
-        let stm_acc = if side == Color::Red { &board.nnue_state.red_acc } else { &board.nnue_state.black_acc };
-        let ntm_acc = if side == Color::Red { &board.nnue_state.black_acc } else { &board.nnue_state.red_acc };
-        let non_king_count = board.nnue_state.non_king_count;
-        NN_NET.forward_output_from_accumulators(stm_acc, ntm_acc, non_king_count)
-    } else {
-        // Dirty: try cache first
-        if let Some((ra, ba, nc)) = nnue_cache_get(board.zobrist_key) {
-            // Write back to board state and mark clean
-            board.nnue_state.red_acc = ra.clone();
-            board.nnue_state.black_acc = ba.clone();
-            board.nnue_state.non_king_count = nc;
-            board.nnue_state.dirty = false;
-            let stm_acc = if side == Color::Red { &board.nnue_state.red_acc } else { &board.nnue_state.black_acc };
-            let ntm_acc = if side == Color::Red { &board.nnue_state.black_acc } else { &board.nnue_state.red_acc };
-            NN_NET.forward_output_from_accumulators(stm_acc, ntm_acc, nc)
-        } else {
-            // Recompute from scratch
-            let (stm, ntm) = crate::nnue_input::NNInputPlanes::from_board(board);
-            let (ra, ba) = NN_NET.compute_accumulators(&stm.data, &ntm.data);
-            let nc = crate::nnue_input::count_non_king_pieces(board);
-            // Write back to board state and cache
-            board.nnue_state.red_acc = ra.clone();
-            board.nnue_state.black_acc = ba.clone();
-            board.nnue_state.non_king_count = nc;
-            board.nnue_state.dirty = false;
-            nnue_cache_insert(board.zobrist_key, (ra.clone(), ba.clone(), nc));
-            // Now select accumulators
-            let stm_acc = if side == Color::Red { &ra } else { &ba };
-            let ntm_acc = if side == Color::Red { &ba } else { &ra };
-            NN_NET.forward_output_from_accumulators(stm_acc, ntm_acc, nc)
-        }
-    };
+    // Encode board into NNUE dual-perspective input planes
+    let (_stm, _ntm) = NNInputPlanes::from_board(board);
+    let _non_king_count = crate::nnue_input::count_non_king_pieces(board);
 
+    let output = NN_NET.forward_output(&_stm.data, &_ntm.data, _non_king_count);
+
+    // Fixed 75% NN / 25% handcrafted blend.
+    // Both nn_score and handcrafted are normalized to [-400, 400] via tanh,
+    // then blended and offset by correction.
     let nn_score = output.nn_score;
     let handcrafted_norm = (handcrafted as f32 / (MATE_SCORE as f32 / 4.0)).tanh() * 400.0;
     let correction = output.correction;
+
     let blended = 0.75 * nn_score + 0.25 * handcrafted_norm + correction;
     blended as i32
 }
@@ -845,95 +806,6 @@ mod tests {
         assert_eq!(net.ft_weights.len(), loaded.ft_weights.len());
         for (a, b) in net.ft_weights.iter().zip(loaded.ft_weights.iter()) {
             assert_eq!(a.vals, b.vals);
-        }
-    }
-
-    #[test]
-    fn test_incremental_make_undo_cycle() {
-        use crate::{Board, RuleSet, Action};
-        use crate::nnue_state::NnueState;
-        use rand::rngs::StdRng;
-        use rand::SeedableRng;
-        use rand::Rng;
-
-        let mut board = Board::new(RuleSet::Official, 1);
-        // Fresh board starts with computed accumulators
-        board.nnue_state = NnueState::fresh(&board);
-        assert!(!board.nnue_state.dirty);
-
-        let mut rng: StdRng = SeedableRng::from_seed([42u8; 32]);
-
-        for _ in 0..30 {
-            let saved_state = board.nnue_state.clone();
-            let side = board.current_side;
-            let moves = crate::movegen::generate_legal_moves(&mut board, side);
-            if moves.is_empty() { break; }
-            let mv = moves[rng.gen_range(0..moves.len())].clone();
-
-            // Apply move using Board::make_move
-            let action = Action::new(mv.src, mv.tar, mv.captured);
-            board.make_move(action.clone());
-
-            // After make_move, dirty should be true
-            assert!(board.nnue_state.dirty, "dirty should be true after make_move");
-
-            // Evaluate to trigger recompute and cache
-            let side = board.current_side;
-            let _eval = crate::nn_eval::nn_evaluate_or_handcrafted(&mut board, side, false);
-            assert!(!board.nnue_state.dirty, "dirty should be false after evaluation");
-
-            // Undo move
-            board.undo_move();
-
-            // After undo, state must match saved snapshot
-            assert!(!board.nnue_state.dirty, "dirty should be false after undo");
-            assert_eq!(board.nnue_state.red_acc.vals, saved_state.red_acc.vals,
-                       "red_acc vals must match after undo");
-            assert_eq!(board.nnue_state.black_acc.vals, saved_state.black_acc.vals,
-                       "black_acc vals must match after undo");
-            assert_eq!(board.nnue_state.non_king_count, saved_state.non_king_count,
-                       "non_king_count must match after undo");
-        }
-    }
-
-    #[test]
-    fn test_incremental_equals_recompute() {
-        use crate::{Board, RuleSet};
-        use crate::nnue_state::NnueState;
-        use rand::rngs::StdRng;
-        use rand::SeedableRng;
-        use rand::Rng;
-
-        let mut board = Board::new(RuleSet::Official, 1);
-        board.nnue_state = NnueState::fresh(&board);
-        let mut rng: StdRng = SeedableRng::from_seed([42u8; 32]);
-
-        for _ in 0..30 {
-            // Evaluate at clean position (incremental path)
-            let side = board.current_side;
-            let eval_inc = crate::nn_eval::nn_evaluate_or_handcrafted(&mut board, side, false);
-
-            // Force recompute by marking dirty and clearing accumulators
-            board.nnue_state.dirty = true;
-            // Clear stored accumulators to force full recompute
-            let _nc = board.nnue_state.non_king_count;
-            board.nnue_state.red_acc = crate::nn_eval::Accumulator { vals: [0i16; crate::nnue_input::FT_DIM] };
-            board.nnue_state.black_acc = crate::nn_eval::Accumulator { vals: [0i16; crate::nnue_input::FT_DIM] };
-            let eval_rcp = crate::nn_eval::nn_evaluate_or_handcrafted(&mut board, side, false);
-
-            assert!((eval_inc - eval_rcp).abs() < 1,
-                    "mismatch: {} vs {}", eval_inc, eval_rcp);
-
-            // Make a random move
-            let side = board.current_side;
-            let moves = crate::movegen::generate_legal_moves(&mut board, side);
-            if moves.is_empty() { break; }
-            let mv = moves[rng.gen_range(0..moves.len())].clone();
-            let action = crate::Action::new(mv.src, mv.tar, mv.captured);
-            board.make_move(action.clone());
-
-            // Reset for next iteration
-            board.nnue_state = NnueState::fresh(&board);
         }
     }
 }
