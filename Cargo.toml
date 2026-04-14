@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 smallvec = "1"
 mimalloc = "0.1.48"
-ahash = "0.8"
+rapidhash = { version = "4", features = ["unsafe"] }
 ndarray = { version = "0.17", optional = true }
 serde = { version = "1", features = ["derive"] }
 encoding_rs = { version = "0.8", optional = true }

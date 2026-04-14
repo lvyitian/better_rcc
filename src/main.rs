@@ -14,7 +14,7 @@ use std::fmt;
 use std::io;
 use std::io::Write;
 use std::sync::OnceLock;
-use ahash::AHashMap;
+use rapidhash::{RapidHashMap, HashMapExt};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -598,14 +598,14 @@ impl TranspositionTable {
 ///   pawn vs advisor) where perfect play is achievable via search.
 pub mod book {
     use super::*;
-    use ahash::AHashMap;
+    use rapidhash::{RapidHashMap, HashMapExt};
 
     /// Opening book entry: position hash -> single preferred move
     /// Using a simpler map since most positions have only one move
     pub struct OpeningBook {
-        book: AHashMap<u64, Action>,
+        book: RapidHashMap<u64, Action>,
         /// For positions with multiple moves, store alternatives keyed by hash
-        alternatives: AHashMap<u64, Vec<Action>>,
+        alternatives: RapidHashMap<u64, Vec<Action>>,
     }
 
     impl Default for OpeningBook {
@@ -617,8 +617,8 @@ pub mod book {
     impl OpeningBook {
         pub fn new() -> Self {
             let mut book = OpeningBook {
-                book: AHashMap::new(),
-                alternatives: AHashMap::new(),
+                book: RapidHashMap::new(),
+                alternatives: RapidHashMap::new(),
             };
             book.init_all_openings();
             book
@@ -1582,7 +1582,7 @@ pub mod movegen {
 /// # State Tracking
 /// - `zobrist_key`: Incremental hash of position, updated on each move
 /// - `move_history`: Stack of all moves for undo and repetition detection
-/// - `repetition_history`: AHashMap counting position occurrences for repetition rules
+/// - `repetition_history`: RapidHashMap counting position occurrences for repetition rules
 #[derive(Clone)]
 pub struct Board {
     pub bitboards: Bitboards,
@@ -1590,7 +1590,7 @@ pub struct Board {
     pub current_side: Color,                // Side to move
     pub rule_set: RuleSet,                 // Game rules (affects repetition detection)
     pub move_history: Vec<Action>,          // Move stack for undo/display
-    pub repetition_history: AHashMap<u64, u8>, // Position count for repetition
+    pub repetition_history: RapidHashMap<u64, u8>, // Position count for repetition
 }
 
 impl Board {
@@ -1659,7 +1659,7 @@ impl Board {
         }
         zobrist_key ^= zobrist.side;
 
-        let mut repetition_history = AHashMap::new();
+        let mut repetition_history = RapidHashMap::new();
         repetition_history.insert(zobrist_key, 1);
 
         Board {
@@ -1756,7 +1756,7 @@ impl Board {
         // Include side hash to match Board::new() behavior (side XOR included in starting zobrist)
         zobrist_key ^= zobrist.side;
 
-        let mut repetition_history = AHashMap::new();
+        let mut repetition_history = RapidHashMap::new();
         repetition_history.insert(zobrist_key, 1);
 
         Board {
