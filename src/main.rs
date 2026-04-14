@@ -831,7 +831,7 @@ pub mod book {
             // Now check self-check legality (requires mutable borrow, done separately)
             let valid_moves: Vec<Action> = occupancy_ok.into_iter()
                 .filter(|a| {
-                    let (legal, _) = movegen::is_legal_move(board, a.clone(), board.current_side);
+                    let (legal, _) = movegen::is_legal_move(board, &a, board.current_side);
                     legal
                 })
                 .collect();
@@ -1346,7 +1346,7 @@ pub mod movegen {
     }
 
     #[inline(always)]
-    pub fn is_legal_move(board: &mut Board, action: Action, side: Color) -> (bool, bool) {
+    pub fn is_legal_move(board: &mut Board, action: &Action, side: Color) -> (bool, bool) {
         let src = action.src;
         let tar = action.tar;
         // Must have a piece to move — return false if src is empty
@@ -1377,7 +1377,7 @@ pub mod movegen {
         let pseudo_moves = generate_pseudo_moves(board, color);
 
         for action in pseudo_moves {
-            let (legal, gives_check) = is_legal_move(board, action.clone(), color);
+            let (legal, gives_check) = is_legal_move(board, &action, color);
             if legal {
                 let mut a = action;
                 a.is_check = gives_check;
@@ -1395,7 +1395,7 @@ pub mod movegen {
 
         let mut legal_captures = SmallVec::new();
         for action in moves {
-            let (legal, gives_check) = is_legal_move(board, action.clone(), color);
+            let (legal, gives_check) = is_legal_move(board, &action, color);
             if legal {
                 let mut a = action;
                 a.is_check = gives_check;
@@ -6034,7 +6034,7 @@ mod tests {
             (4, 5, Color::Black, PieceType::Pawn),
         ]);
         let action = Action::new(Coord::new(4, 4), Coord::new(4, 5), Some(Piece { color: Color::Black, piece_type: PieceType::Pawn }));
-        let (legal, gives_check) = movegen::is_legal_move(&mut board, action, Color::Red);
+        let (legal, gives_check) = movegen::is_legal_move(&mut board, &action, Color::Red);
         assert!(legal, "Chariot capturing pawn should be legal");
         assert!(!gives_check, "Capture should not give check in this position");
     }
@@ -6094,7 +6094,7 @@ mod tests {
         ]);
         // Red pawn at (4,3) crossed river - can move sideways to attack
         let action = Action::new(Coord::new(4, 3), Coord::new(3, 3), Some(Piece { color: Color::Black, piece_type: PieceType::King }));
-        let (legal, _) = movegen::is_legal_move(&mut board, action, Color::Red);
+        let (legal, _) = movegen::is_legal_move(&mut board, &action, Color::Red);
         assert!(legal, "Pawn after river can move sideways");
     }
 
@@ -6107,7 +6107,7 @@ mod tests {
         ]);
         // Elephant at (4,5) moves to (6,7) - both on red side (y >= 5)
         let action = Action::new(Coord::new(4, 5), Coord::new(6, 7), Some(Piece { color: Color::Black, piece_type: PieceType::Pawn }));
-        let (legal, _) = movegen::is_legal_move(&mut board, action, Color::Red);
+        let (legal, _) = movegen::is_legal_move(&mut board, &action, Color::Red);
         assert!(legal, "Elephant can move within its territory");
     }
 
@@ -6120,7 +6120,7 @@ mod tests {
         ]);
         // Advisor at (4,8) can move to (5,9) which is in red palace
         let action = Action::new(Coord::new(4, 8), Coord::new(5, 9), Some(Piece { color: Color::Black, piece_type: PieceType::Pawn }));
-        let (legal, _) = movegen::is_legal_move(&mut board, action, Color::Red);
+        let (legal, _) = movegen::is_legal_move(&mut board, &action, Color::Red);
         assert!(legal, "Advisor can move within palace");
     }
 
@@ -6133,7 +6133,7 @@ mod tests {
         ]);
         // King at (4,8) can move to (5,8) which is in palace
         let action = Action::new(Coord::new(4, 8), Coord::new(5, 8), Some(Piece { color: Color::Black, piece_type: PieceType::Pawn }));
-        let (legal, _) = movegen::is_legal_move(&mut board, action, Color::Red);
+        let (legal, _) = movegen::is_legal_move(&mut board, &action, Color::Red);
         assert!(legal, "King can move within palace");
     }
 
@@ -6159,7 +6159,7 @@ mod tests {
         ]);
         // Cannon with screen can capture
         let action = Action::new(Coord::new(4, 4), Coord::new(4, 8), Some(Piece { color: Color::Black, piece_type: PieceType::King }));
-        let (legal, _) = movegen::is_legal_move(&mut board, action, Color::Red);
+        let (legal, _) = movegen::is_legal_move(&mut board, &action, Color::Red);
         assert!(legal, "Cannon with screen can capture");
     }
 
@@ -6173,7 +6173,7 @@ mod tests {
         let legal_moves = movegen::generate_legal_moves(&mut board, Color::Red);
         assert!(!legal_moves.is_empty(), "Should have legal moves");
         for m in &legal_moves {
-            let (legal, _) = movegen::is_legal_move(&mut board, *m, Color::Red);
+            let (legal, _) = movegen::is_legal_move(&mut board, m, Color::Red);
             assert!(legal, "All generated legal moves should pass is_legal_move");
         }
     }
