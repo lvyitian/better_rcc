@@ -1,4 +1,8 @@
 fn main() {
+    // Rerun this build script if RUSTFLAGS changes (affects compilation)
+    println!("cargo:rerun-if-env-changed=RUSTFLAGS");
+    // Rerun if target-cpu changes (affects code generation)
+    println!("cargo:rerun-if-env-changed=TARGET_CPU_ARGS");
     // Apply -ffast-math and -C target-cpu=native for optimized builds.
     // This is propagated to all crates in the workspace via RUSTFLAGS.
     let current_flags = std::env::var("RUSTFLAGS").unwrap_or_default();
