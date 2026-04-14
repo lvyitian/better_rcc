@@ -107,7 +107,7 @@ pub const MAX_CHECK_EXTENSION: u8 = 2;
 pub const MAX_TOTAL_EXTENSION: u8 = 3;
 
 /// Transposition table size: 2^25 ≈ 33 million entries
-/// Each entry is ~16 bytes, so ~500MB total
+/// Each entry is ~24 bytes (after TtBestMove optimization), so ~800MB total
 pub const TT_SIZE: usize = 1 << 25;
 
 /// Number of repeated positions before declaring a repetition violation
@@ -498,13 +498,49 @@ pub enum TTEntryType {
 /// - Exact scores work normally
 /// - Lower bounds (beta cutoffs) can only be used if beta >= stored value
 /// - Upper bounds (alpha cutoffs) can only be used if alpha <= stored value
+/// Compact best move storage for transposition table entries.
+#[derive(Debug, Clone, Copy)]
+pub struct TtBestMove {
+    pub src: u8,           // Source square index (0-89)
+    pub tar: u8,           // Target square index (0-89)
+    pub captured: Option<Piece>, // Captured piece (if any)
+}
+
+impl TtBestMove {
+    #[inline(always)]
+    pub fn from_action(action: &Action) -> Option<Self> {
+        if action.nnue_snapshot.is_some() {
+            // Don't store moves with NNUE snapshots in TT - they are too large
+            None
+        } else {
+            Some(TtBestMove {
+                src: action.src.y as u8 * 9 + action.src.x as u8,
+                tar: action.tar.y as u8 * 9 + action.tar.x as u8,
+                captured: action.captured,
+            })
+        }
+    }
+
+    #[inline(always)]
+    pub fn to_action(&self) -> Action {
+        Action {
+            src: Coord::new((self.src % 9) as i8, (self.src / 9) as i8),
+            tar: Coord::new((self.tar % 9) as i8, (self.tar / 9) as i8),
+            captured: self.captured,
+            is_check: false,
+            is_capture_threat: false,
+            nnue_snapshot: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TTEntry {
     pub key: u64,           // Position hash (Zobrist key) for verification
     pub depth: u8,          // Search depth this entry represents (higher = more trusted)
     pub value: i32,         // Evaluated score (matedist for mate scores)
     pub entry_type: TTEntryType,  // Exact, Lower bound, or Upper bound
-    pub best_move: Option<Action>, // Best move from this position (for move ordering)
+    pub best_move: Option<TtBestMove>, // Best move from this position (for move ordering)
 }
 
 impl Default for TTEntry {
@@ -566,7 +602,7 @@ impl TranspositionTable {
             entry.depth = depth;
             entry.value = value;
             entry.entry_type = entry_type;
-            entry.best_move = best_move;
+            entry.best_move = best_move.and_then(|a| TtBestMove::from_action(&a));
         }
     }
 
@@ -2616,7 +2652,7 @@ pub mod search {
             && entry.depth >= depth {
                 match entry.entry_type {
                     TTEntryType::Exact => {
-                        *best_action = entry.best_move;
+                        *best_action = entry.best_move.map(|tt_move| tt_move.to_action());
                         return entry.value;
                     }
                     TTEntryType::Lower => {
@@ -2656,16 +2692,16 @@ pub mod search {
 
         // Internal Iterative Deepening: if no TT move at depth-2, search shallow to find one
         // This improves move ordering especially in the midgame
-        let tt_move = shared_tt.probe(key).and_then(|e| e.best_move);
-        let tt_move = if tt_move.is_none() && depth >= 4 && !is_in_check {
-            let mut dummy_best = None;
+        let tt_move: Option<TtBestMove> = shared_tt.probe(key).and_then(|e| e.best_move);
+        let tt_move: Option<Action> = if tt_move.is_none() && depth >= 4 && !is_in_check {
+            let mut dummy_best: Option<Action> = None;
             zw_search(
                 board, thread_ctx, shared_tt, depth - 2, beta,
                 side, false, &mut dummy_best, time_ctx, extension_count, prev_action.clone()
             );
-            shared_tt.probe(key).and_then(|e| e.best_move)
+            shared_tt.probe(key).and_then(|e| e.best_move).map(|tt| tt.to_action())
         } else {
-            tt_move
+            tt_move.map(|tt| tt.to_action())
         };
 
         // Null move pruning: try skipping a move to prove the position is strong
@@ -2678,9 +2714,10 @@ pub mod search {
                 board.current_side = board.current_side.opponent();
 
                 let null_depth = depth - 1 - NULL_MOVE_REDUCTION;
+                let mut null_best: Option<Action> = None;
                 let null_eval = -zw_search(
                     board, thread_ctx, shared_tt, null_depth, -alpha,
-                    side.opponent(), false, &mut None, time_ctx, extension_count, None
+                    side.opponent(), false, &mut null_best, time_ctx, extension_count, None
                 );
 
                 board.zobrist_key ^= zobrist.side;
@@ -4516,13 +4553,20 @@ mod tests {
 
     #[test]
     fn test_initial_position_has_legal_moves() {
-        let mut board = Board::new(RuleSet::Official, 1);
-        let red_moves = movegen::generate_legal_moves(&mut board, Color::Red);
-        assert!(!red_moves.is_empty(), "Red should have legal moves in initial position");
+        std::thread::Builder::new()
+            .stack_size(67108864) // 64MB
+            .spawn(|| {
+                let mut board = Board::new(RuleSet::Official, 1);
+                let red_moves = movegen::generate_legal_moves(&mut board, Color::Red);
+                assert!(!red_moves.is_empty(), "Red should have legal moves in initial position");
 
-        board.current_side = Color::Black;
-        let black_moves = movegen::generate_legal_moves(&mut board, Color::Black);
-        assert!(!black_moves.is_empty(), "Black should have legal moves in initial position");
+                board.current_side = Color::Black;
+                let black_moves = movegen::generate_legal_moves(&mut board, Color::Black);
+                assert!(!black_moves.is_empty(), "Black should have legal moves in initial position");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
@@ -5967,14 +6011,22 @@ mod tests {
 
     #[test]
     fn test_generate_capture_moves_both_colors() {
-        let mut board = make_board(vec![
-            (4, 4, Color::Red, PieceType::Chariot),
-            (4, 5, Color::Black, PieceType::Pawn),
-        ]);
-        let red_captures = movegen::generate_capture_moves(&mut board, Color::Red);
-        let black_captures = movegen::generate_capture_moves(&mut board, Color::Black);
-        assert!(!red_captures.is_empty(), "Red should have captures");
-        assert!(black_captures.is_empty(), "Black should have no captures (nothing to capture)");
+        // Run in a thread with 64MB stack to avoid overflow during deep recursion
+        std::thread::Builder::new()
+            .stack_size(67108864) // 64MB
+            .spawn(|| {
+                let mut board = make_board(vec![
+                    (4, 4, Color::Red, PieceType::Chariot),
+                    (4, 5, Color::Black, PieceType::Pawn),
+                ]);
+                let red_captures = movegen::generate_capture_moves(&mut board, Color::Red);
+                let black_captures = movegen::generate_capture_moves(&mut board, Color::Black);
+                assert!(!red_captures.is_empty(), "Red should have captures");
+                assert!(black_captures.is_empty(), "Black should have no captures (nothing to capture)");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
