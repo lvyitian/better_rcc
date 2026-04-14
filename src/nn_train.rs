@@ -390,6 +390,7 @@ pub mod nn_train_impl {
     /// NNUEFeedForward uses QA-quantized i16 arranged as:
     ///   - ft_weights: [INPUT_DIM][FT_DIM]  (each row = one feature's FT output over 1260 inputs)
     ///   - out_weights: [[i16; FT_DIM*2]; NUM_BUCKETS]  (each bucket row)
+    ///
     /// The burn → ndarray conversion:
     ///   - ft.weight: burn [1024, 1260] → ndarray: transpose to [1260][1024], then QA-quantize to i16
     ///   - out.weight: burn [8, 2048]  → [8][2048] as f32, quantized to i16
@@ -427,8 +428,7 @@ pub mod nn_train_impl {
         }
 
         let mut ft_bias_i16 = Vec::with_capacity(FT_DIM);
-        for i in 0..FT_DIM {
-            let w = ft_bias_data[i];
+        for w in &ft_bias_data {
             let w_i16 = (w.round() as i32).clamp(-QA, QA) as i16;
             ft_bias_i16.push(w_i16);
         }
@@ -444,8 +444,7 @@ pub mod nn_train_impl {
         }
 
         let mut out_bias_i16 = Vec::with_capacity(NUM_BUCKETS);
-        for i in 0..NUM_BUCKETS {
-            let w = out_bias_data[i];
+        for w in &out_bias_data {
             let w_i16 = (w.round() as i32).clamp(-QA, QA) as i16;
             out_bias_i16.push(w_i16);
         }

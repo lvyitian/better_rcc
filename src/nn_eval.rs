@@ -209,8 +209,8 @@ impl<'de> serde::Deserialize<'de> for Accumulator {
                 A: serde::de::SeqAccess<'de>,
             {
                 let mut arr = [0i16; FT_DIM];
-                for i in 0..FT_DIM {
-                    arr[i] = seq
+                for elem in arr.iter_mut() {
+                    *elem = seq
                         .next_element()?
                         .ok_or_else(|| serde::de::Error::custom("too few elements"))?;
                 }

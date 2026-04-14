@@ -98,79 +98,6 @@ fn init_chariot_rays() -> ([[u128; 4]; BOARD_SQ_COUNT], [[u128; 4]; BOARD_SQ_COU
     (chariot_rays, cannon_screens)
 }
 
-pub fn init_non_slide_attacks() -> (
-    [[u128; 8]; BOARD_SQ_COUNT],
-    [[u128; 4]; BOARD_SQ_COUNT],
-    [[u128; 4]; BOARD_SQ_COUNT],
-    [u128; BOARD_SQ_COUNT],
-) {
-    let mut horse_attacks = [[0u128; 8]; BOARD_SQ_COUNT];
-    let mut advisor_attacks = [[0u128; 4]; BOARD_SQ_COUNT];
-    let mut elephant_attacks = [[0u128; 4]; BOARD_SQ_COUNT];
-    let mut king_attacks = [0u128; BOARD_SQ_COUNT];
-
-    // Horse deltas (8 directions, knee position checked separately by caller)
-    let horse_deltas: [(i8, i8); 8] = [(2, 1), (2, -1), (-2, 1), (-2, -1), (1, 2), (1, -2), (-1, 2), (-1, -2)];
-    // Elephant deltas and eye positions (4 diagonal directions)
-    let elephant_deltas: [(i8, i8); 4] = [(2, 2), (2, -2), (-2, 2), (-2, -2)];
-    let elephant_blocks: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
-    // Advisor deltas (4 diagonal directions, palace-bound)
-    let advisor_deltas: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
-    // King orthogonal offsets (palace-bound)
-    let king_offsets: [(i8, i8); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
-
-    for sq in 0..BOARD_SQ_COUNT {
-        let x = (sq % 9) as i8;
-        let y = (sq / 9) as i8;
-
-        // Horse: 8 L-shape destinations (knee position checked separately by caller)
-        for (i, &(dx, dy)) in horse_deltas.iter().enumerate() {
-            let tx = x + dx;
-            let ty = y + dy;
-            if (0..9).contains(&tx) && (0..10).contains(&ty) {
-                let tsq = (ty * 9 + tx) as u8;
-                horse_attacks[sq][i] = 1_u128 << tsq;
-            }
-        }
-
-        // Advisor: 4 diagonal destinations (palace-bound checked by caller)
-        for (i, &(dx, dy)) in advisor_deltas.iter().enumerate() {
-            let tx = x + dx;
-            let ty = y + dy;
-            if (0..9).contains(&tx) && (0..10).contains(&ty) {
-                let tsq = (ty * 9 + tx) as u8;
-                advisor_attacks[sq][i] = 1_u128 << tsq;
-            }
-        }
-
-        // Elephant: 4 diagonal destinations (river-bound + eye-check done by caller)
-        for (i, ((dx, dy), (bx, by))) in elephant_deltas.iter().zip(elephant_blocks.iter()).enumerate() {
-            let tx = x + dx;
-            let ty = y + dy;
-            let ex = x + bx;
-            let ey = y + by;
-            if (0..9).contains(&tx) && (0..10).contains(&ty)
-                && (0..9).contains(&ex) && (0..10).contains(&ey)
-            {
-                let tsq = (ty * 9 + tx) as u8;
-                elephant_attacks[sq][i] = 1_u128 << tsq;
-            }
-        }
-
-        // King: 4 orthogonal destinations (palace-bound checked by caller)
-        for (dx, dy) in king_offsets {
-            let tx = x + dx;
-            let ty = y + dy;
-            if (0..9).contains(&tx) && (0..10).contains(&ty) {
-                let tsq = (ty * 9 + tx) as u8;
-                king_attacks[sq] |= 1_u128 << tsq;
-            }
-        }
-    }
-
-    (horse_attacks, advisor_attacks, elephant_attacks, king_attacks)
-}
-
 /// Get CHARIOT_RAYS table (lazily initialized)
 pub fn get_chariot_rays() -> &'static [[u128; 4]; BOARD_SQ_COUNT] {
     CHARIOT_RAYS_STORAGE.get_or_init(|| init_chariot_rays().0)
@@ -245,7 +172,7 @@ impl Bitboards {
                 if self.pieces[pt][c] & bb != 0 {
                     return Some(Piece {
                         color: if c == 0 { Color::Red } else { Color::Black },
-                        piece_type: unsafe { std::mem::transmute(pt as u8) },
+                        piece_type: unsafe { std::mem::transmute::<u8, PieceType>(pt as u8) },
                     });
                 }
             }
@@ -264,9 +191,9 @@ impl Bitboards {
     /// reference board cells.
     pub fn as_cells(&self) -> [[Option<Piece>; 9]; 10] {
         let mut cells = [[None; 9]; 10];
-        for y in 0..10 {
-            for x in 0..9 {
-                cells[y][x] = self.piece_at((y * 9 + x) as u8);
+        for (y, row) in cells.iter_mut().enumerate().take(10) {
+            for (x, cell) in row.iter_mut().enumerate().take(9) {
+                *cell = self.piece_at((y * 9 + x) as u8);
             }
         }
         cells
@@ -277,8 +204,8 @@ impl Bitboards {
     pub fn flip_vertically(&mut self) {
         let mut new_pieces = [[0u128; 2]; 7];
 
-        for pt in 0..7 {
-            for c in 0..2 {
+        for (pt, new_piece_row) in new_pieces.iter_mut().enumerate() {
+            for (c, new_bb_slot) in new_piece_row.iter_mut().enumerate() {
                 let bb = self.pieces[pt][c];
                 let mut new_bb = 0u128;
                 let mut sq = 0u8;
@@ -291,7 +218,7 @@ impl Bitboards {
                     }
                     sq += 1;
                 }
-                new_pieces[pt][c] = new_bb;
+                *new_bb_slot = new_bb;
             }
         }
 
@@ -319,8 +246,7 @@ impl Bitboards {
         let rays = get_chariot_rays();
         let mut attacks = 0u128;
 
-        for dir in 0..4 {
-            let ray = rays[sq as usize][dir];
+        for (dir, &ray) in rays[sq as usize].iter().enumerate().take(4) {
             let blockers = ray & occ;
             if blockers == 0 {
                 attacks |= ray;  // Clear path — all squares reachable
@@ -345,8 +271,7 @@ impl Bitboards {
         let rays = get_chariot_rays();
         let mut attacks = 0u128;
 
-        for dir in 0..4 {
-            let ray = rays[sq as usize][dir];
+        for (dir, &ray) in rays[sq as usize].iter().enumerate().take(4) {
             let blockers = ray & occ;
             if blockers == 0 {
                 // No screen, no captures - all squares along ray are empty (already in ray)
@@ -564,8 +489,7 @@ impl Bitboards {
         let mut attackers = 0u128;
 
         // Chariot attacks: slides in 4 directions, nearest piece in each direction
-        for dir in 0..4 {
-            let ray = rays[target as usize][dir];
+        for ray in rays[target as usize].iter().take(4) {
             let blockers = ray & occ;
             if blockers == 0 { continue; }
             let nearest = Self::lsb_index(blockers);
@@ -577,8 +501,7 @@ impl Bitboards {
         }
 
         // Cannon attacks: needs exactly 1 screen between src and target
-        for dir in 0..4 {
-            let ray = rays[target as usize][dir];
+        for (dir, &ray) in rays[target as usize].iter().enumerate().take(4) {
             let blockers = ray & occ;
             if blockers == 0 { continue; }
             let nearest = Self::lsb_index(blockers);
@@ -813,6 +736,7 @@ mod tests {
         assert_eq!(red_occ & black_occ, 0, "Red and Black should not overlap");
     }
 
+    #[allow(clippy::needless_range_loop)]
     #[test]
     fn test_bitboards_occupied_all_matches_cells() {
         let cells = Board::new(RuleSet::Official, 1).cells();
@@ -916,6 +840,7 @@ mod tests {
     }
 
     #[cfg(feature = "nnue")]
+    #[allow(clippy::needless_range_loop)]
     #[test]
     fn test_bitboards_nnue_equivalence() {
         use crate::nnue_input::NNInputPlanes;
@@ -940,7 +865,7 @@ mod tests {
             let side = board2.current_side;
             let moves = generate_legal_moves(&mut board2, side);
             if moves.is_empty() { break; }
-            let idx = (board2.zobrist_key as usize % moves.len());
+            let idx = board2.zobrist_key as usize % moves.len();
             board2.make_move(moves[idx]);
         }
 
