@@ -942,7 +942,7 @@ mod tests {
         let moves = movegen::generate_legal_moves(&mut board, Color::Red);
 
         if let Some(first_move) = moves.first() {
-            let action = *first_move;
+            let action = first_move.clone();
 
             // Before move: bitboards should match cells
             let bb_before = Bitboards::from_cells(&board.cells());
@@ -1003,7 +1003,7 @@ mod tests {
             let moves = generate_legal_moves(&mut board2, side);
             if moves.is_empty() { break; }
             let idx = (board2.zobrist_key as usize % moves.len());
-            board2.make_move(moves[idx]);
+            board2.make_move(moves[idx].clone());
         }
 
         let bb2 = &board2.bitboards;

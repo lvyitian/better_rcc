@@ -359,14 +359,17 @@ impl Coord {
 // =============================================================================
 
 /// Represents a chess move with full context for search and evaluation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Action {
     pub src: Coord,                  // Source square
     pub tar: Coord,                  // Target square
     pub captured: Option<Piece>,      // Piece captured (if any)
     pub is_check: bool,              // Does this move give check?
     pub is_capture_threat: bool,     // Does this move threaten capture? (for repetition)
-    pub nnue_snapshot: Option<crate::nnue_state::NnueSnapshot>,
+    /// NNUE snapshot of the position BEFORE this move was made.
+    /// Stored on heap via Box to avoid bloating Action size on stack.
+    /// None for moves that didn't go through make_move (e.g., TT best moves).
+    pub nnue_snapshot: Option<Box<crate::nnue_state::NnueSnapshot>>,
 }
 
 impl Action {
@@ -383,7 +386,7 @@ impl Action {
     }
 
     #[inline(always)]
-    pub fn mvv_lva_score(self) -> i32 {
+    pub fn mvv_lva_score(&self) -> i32 {
         // MVV-LVA: Most Valuable Victim - Least Valuable Attacker
         // Captured piece value × 100, so high-value captures rank first
         // This encourages capturing the opponent's valuable pieces first
@@ -1842,8 +1845,8 @@ impl Board {
             return;
         };
 
-        // Save NNUE snapshot for undo (before making the move)
-        action.nnue_snapshot = Some(crate::nnue_state::NnueSnapshot::from_board(self));
+        // Save pre-move NNUE snapshot for undo (boxed to avoid bloating Action size)
+        action.nnue_snapshot = Some(Box::new(crate::nnue_state::NnueSnapshot::from_board(self)));
 
         // Apply the incremental NNUE update (includes cache insertion and sets dirty=true)
         let src_sq = (action.src.y * 9 + action.src.x) as u8;
@@ -1893,16 +1896,16 @@ impl Board {
     /// The move must have been made with make_move() - we assume the history
     /// is consistent. The action's captured field holds what was taken.
     pub fn undo_move(&mut self) {
-        // Pop the last action from history (it contains the NNUE snapshot)
+        // Pop the last action from history (it contains the pre-move zobrist key)
         let action = self.move_history.pop().expect("undo_move: move_history is empty");
 
-        // Restore NNUE state from snapshot
+        // Restore NNUE state from the boxed snapshot
         if let Some(snap) = action.nnue_snapshot {
             self.nnue_state.red_acc = snap.red_acc;
             self.nnue_state.black_acc = snap.black_acc;
             self.nnue_state.non_king_count = snap.non_king_count;
             self.nnue_state.dirty = false;
-            // Remove the pre-move position from cache (it will be re-inserted if reached again)
+            // Remove the post-move position from cache (it will be re-inserted if reached again)
             crate::nnue_state::nnue_cache_remove(&self.zobrist_key);
         }
 
@@ -4694,11 +4697,11 @@ mod tests {
 
             // Pick random move using SimpleRng
             let idx = rng.next_i32(legal_moves.len() as i32) as usize;
-            let chosen = legal_moves[idx];
+            let chosen = legal_moves[idx].clone();
 
             // Clone and try make/undo on clone
             let mut board_clone = board.clone();
-            board_clone.make_move(chosen);
+            board_clone.make_move(chosen.clone());
             board_clone.undo_move();
 
             // Verify board is restored
@@ -4739,7 +4742,7 @@ mod tests {
         for action in legal_moves.iter().take(5) {
             // Clone and try make/undo on clone
             let mut board_clone = board.clone();
-            board_clone.make_move(*action);
+            board_clone.make_move(action.clone());
             board_clone.undo_move();
 
             // Verify board is restored
@@ -6677,7 +6680,7 @@ mod tests {
         // Make a move
         let legal_moves = movegen::generate_legal_moves(&mut board, Color::Red);
         if !legal_moves.is_empty() {
-            let action = legal_moves[0];
+            let action = legal_moves[0].clone();
             let key_after_make = board.zobrist_key;
 
             board.make_move(action);
@@ -6704,7 +6707,7 @@ mod tests {
             if legal_moves.is_empty() {
                 break;
             }
-            let action = legal_moves[0];
+            let action = legal_moves[0].clone();
             board.make_move(action);
             board.undo_move();
         }
@@ -7338,7 +7341,7 @@ mod tests {
     fn test_undo_move_restores_position() {
         let mut board = Board::new(RuleSet::Official, 1);
         let legal_moves = movegen::generate_legal_moves(&mut board, Color::Red);
-        let action = legal_moves[0];
+        let action = legal_moves[0].clone();
         let original_cells = board.cells();
         let original_key = board.zobrist_key;
 
@@ -7357,7 +7360,7 @@ mod tests {
         let capture_move = legal_moves.into_iter().find(|m| m.captured.is_some());
         if let Some(action) = capture_move {
             let original_cells = board.cells();
-            board.make_move(action);
+            board.make_move(action.clone());
             assert!(action.captured.is_some(), "This should be a capture");
             board.undo_move();
             assert_eq!(board.cells(), original_cells, "Captured piece should be restored");
@@ -7455,7 +7458,7 @@ mod tests {
             }
 
             let idx = rng.next_i32(legal_moves.len() as i32) as usize;
-            let chosen = legal_moves[idx];
+            let chosen = legal_moves[idx].clone();
 
             board.make_move(chosen);
 
@@ -7483,11 +7486,11 @@ mod tests {
             }
 
             let idx = rng.next_i32(legal_moves.len() as i32) as usize;
-            let chosen = legal_moves[idx];
+            let chosen = legal_moves[idx].clone();
 
             // Clone before make_move
             let mut board_copy = board.clone();
-            board_copy.make_move(chosen);
+            board_copy.make_move(chosen.clone());
 
             // After a move, total piece count should decrease by 1 if capture occurred
             let (rc1, bc1) = board.piece_counts();
