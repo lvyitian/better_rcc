@@ -535,20 +535,27 @@ impl Bitboards {
         }
 
         // Cannon attacks: needs exactly 1 screen between src and target
+        // Screen can be ANY color; cannon must be attacker's piece
         for (dir, &ray) in rays[target as usize].iter().enumerate().take(4) {
             let blockers = ray & occ;
             if blockers == 0 { continue; }
-            // FIX: Nearest screen depends on direction
+            // Nearest screen depends on direction
             let nearest = if dir % 2 == 0 {
                 Self::lsb_index(blockers)  // North or East
             } else {
                 Self::msb_index(blockers)   // South or West
             };
-            if self.pieces[PieceType::Cannon as usize][color as usize] & (1_u128 << nearest) != 0 {
-                let second_blockers = ray & occ & !(rays[nearest as usize][dir]);
-                if second_blockers != 0 {
-                    // Cannon can capture through its screen
-                    attackers |= 1_u128 << nearest;
+            // Screen can be any color - find second blocker beyond screen
+            // rays[nearest][dir] = squares from screen going in same direction (beyond screen)
+            let second_blockers = ray & occ & rays[nearest as usize][dir];
+            if second_blockers != 0 {
+                // Second blocker must be attacker's cannon
+                let cannon_mask = second_blockers & self.pieces[PieceType::Cannon as usize][color as usize];
+                if cannon_mask != 0 {
+                    // Target must be enemy-occupied
+                    if self.piece_at(target).map_or(false, |p| p.color != color) {
+                        attackers |= cannon_mask;
+                    }
                 }
             }
         }
@@ -1512,6 +1519,61 @@ mod tests {
         let attacks = bb.cannon_attacks(45, Color::Red);
         assert_ne!(attacks & (1_u128 << 63), 0,
             "Cannon with one screen should capture");
+    }
+
+    /// TEST FOR BUG: cannon_attackers should find cannon NOT at screen position
+    /// Cannon at 45 (Red) attacks target 63 through screen at 54 (Red pawn)
+    #[test]
+    fn test_attackers_cannon_through_screen() {
+        let mut bb = Bitboards::new();
+        // Cannon at (5,5) = 45 (Red)
+        bb.pieces[PieceType::Cannon as usize][Color::Red as usize] = 1_u128 << 45;
+        // Screen at (6,5) = 54 (Red pawn - screen between cannon and target)
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 54;
+        // Target at (7,5) = 63 (Black pawn - what cannon should capture)
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 63;
+
+        let attackers = bb.attackers(63, Color::Red);
+
+        // Red cannon at 45 should be able to attack 63 through screen at 54
+        assert_ne!(attackers & (1_u128 << 45), 0,
+            "Red cannon at 45 should attack Black pawn at 63 through screen at 54");
+    }
+
+    /// Cannon attacks: screen can be ANY color (even opponent's piece)
+    #[test]
+    fn test_attackers_cannon_with_opponent_screen() {
+        let mut bb = Bitboards::new();
+        bb.pieces[PieceType::Cannon as usize][Color::Red as usize] = 1_u128 << 45;
+        // Screen at (6,5) = 54 (BLACK pawn - opponent's screen)
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 54;
+        // Target at (7,5) = 63 (Black pawn)
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] |= 1_u128 << 63;
+
+        let attackers = bb.attackers(63, Color::Red);
+        assert_ne!(attackers & (1_u128 << 45), 0,
+            "Red cannon at 45 should attack through Black screen at 54");
+    }
+
+    /// Black pawn at (4,3) should be able to capture Red pawn at (4,4)
+    #[test]
+    fn test_black_pawn_at_4_3_capture_red_at_4_4() {
+        let mut bb = Bitboards::new();
+        // Red pawn at (4, 4) - x=4, y=4 -> sq = 4*9 + 4 = 40
+        bb.pieces[PieceType::Pawn as usize][Color::Red as usize] = 1_u128 << 40;
+        // Black pawn at (4, 3) - x=4, y=3 -> sq = 3*9 + 4 = 31
+        bb.pieces[PieceType::Pawn as usize][Color::Black as usize] = 1_u128 << 31;
+
+        // Test pawn_attacks from Black's perspective
+        let attacks = bb.pawn_attacks(31, Color::Black);
+        // Black pawn at y=3, dir=+1, forward attacks to y=4 -> sq=31+9=40
+        assert_ne!(attacks & (1_u128 << 40), 0,
+            "Black pawn at (4,3) should attack forward to (4,4)");
+
+        // Test attackers function
+        let attackers = bb.attackers(40, Color::Black);
+        assert_ne!(attackers & (1_u128 << 31), 0,
+            "Black pawn at (4,3) should be attacker of Red pawn at (4,4)");
     }
 
     /// Cannon with two screens cannot capture

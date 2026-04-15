@@ -4532,13 +4532,20 @@ mod tests {
 
     #[test]
     fn test_initial_position_has_legal_moves() {
-        let mut board = Board::new(RuleSet::Official, 1);
-        let red_moves = movegen::generate_legal_moves(&mut board, Color::Red);
-        assert!(!red_moves.is_empty(), "Red should have legal moves in initial position");
+        std::thread::Builder::new()
+            .stack_size(67108864) // 64MB
+            .spawn(|| {
+                let mut board = Board::new(RuleSet::Official, 1);
+                let red_moves = movegen::generate_legal_moves(&mut board, Color::Red);
+                assert!(!red_moves.is_empty(), "Red should have legal moves in initial position");
 
-        board.current_side = Color::Black;
-        let black_moves = movegen::generate_legal_moves(&mut board, Color::Black);
-        assert!(!black_moves.is_empty(), "Black should have legal moves in initial position");
+                board.current_side = Color::Black;
+                let black_moves = movegen::generate_legal_moves(&mut board, Color::Black);
+                assert!(!black_moves.is_empty(), "Black should have legal moves in initial position");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
@@ -5983,14 +5990,22 @@ mod tests {
 
     #[test]
     fn test_generate_capture_moves_both_colors() {
-        let mut board = make_board(vec![
-            (4, 4, Color::Red, PieceType::Chariot),
-            (4, 5, Color::Black, PieceType::Pawn),
-        ]);
-        let red_captures = movegen::generate_capture_moves(&mut board, Color::Red);
-        let black_captures = movegen::generate_capture_moves(&mut board, Color::Black);
-        assert!(!red_captures.is_empty(), "Red should have captures");
-        assert!(black_captures.is_empty(), "Black should have no captures (nothing to capture)");
+        // Run in a thread with 64MB stack to avoid overflow during deep recursion
+        std::thread::Builder::new()
+            .stack_size(67108864) // 64MB
+            .spawn(|| {
+                let mut board = make_board(vec![
+                    (4, 4, Color::Red, PieceType::Chariot),
+                    (4, 5, Color::Black, PieceType::Pawn),
+                ]);
+                let red_captures = movegen::generate_capture_moves(&mut board, Color::Red);
+                let black_captures = movegen::generate_capture_moves(&mut board, Color::Black);
+                assert!(!red_captures.is_empty(), "Red should have captures");
+                assert!(black_captures.is_empty(), "Black should have no captures (nothing to capture)");
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
