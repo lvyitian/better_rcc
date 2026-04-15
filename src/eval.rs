@@ -1134,26 +1134,11 @@ fn attack_rewards(board: &Board, color: Color, phase: i32) -> i32 {
         let (rk, bk) = board.find_kings();
         for (king_color, enemy_king_pos) in [(Color::Red, bk), (Color::Black, rk)] {
             if let Some(kp) = enemy_king_pos {
-                // Count how many pieces of the OTHER color (the attacker) can attack this king
                 let attacker_color = king_color.opponent();
-                let mut attack_count = 0;
-                for y in 0..10 {
-                    for x in 0..9 {
-                        let pos = Coord::new(x as i8, y as i8);
-                        if let Some(p) = board.get(pos) && p.color == attacker_color {
-                            // A piece attacks kp if... let's check if kp is reachable
-                            // Actually let's use generate_pseudo_moves to check attacks
-                            // Simpler: count pieces on the 8 adjacent squares
-                            // Even simpler: if the king is in check, that's already checked
-                            // For now, let's just check if any attacker can reach adjacent squares
-                            let dist = pos.distance_to(kp);
-                            if dist == 1 {
-                                attack_count += 1;
-                            }
-                        }
-                    }
-                }
-                let bonus = attack_count * 25 * king_color.sign();
+                let kp_sq = (kp.y * 9 + kp.x) as u8;
+                let attack_bb = board.bitboards.attackers(kp_sq, attacker_color);
+                let attack_count = attack_bb.count_ones() as i32;
+                let bonus = attack_count as i32 * 25 * king_color.sign();
                 score += bonus;
             }
         }

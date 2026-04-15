@@ -1264,11 +1264,13 @@ pub mod movegen {
                 match board.get(tar) {
                     Some(p) => {
                         if jumped {
+                            // Second piece after screen - cannon can capture it
                             if p.color != color {
                                 moves.push(tar);
                             }
                             break;
                         } else {
+                            // First piece encountered - this is the screen
                             jumped = true;
                         }
                     }
