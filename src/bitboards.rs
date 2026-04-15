@@ -290,31 +290,29 @@ impl Bitboards {
                 // No screen, no captures - all squares along ray are empty (already in ray)
                 attacks |= ray;
             } else {
-                // FIX: Nearest screen depends on direction:
-                // - North/East: nearest = smallest square = lsb_index
-                // - South/West: nearest = largest square = msb_index
+                // Nearest screen square (piece that blocks the cannon)
                 let nearest = if dir % 2 == 0 {
                     Self::lsb_index(blockers)  // North or East
                 } else {
                     Self::msb_index(blockers)   // South or West
                 };
-                // Quiet moves: squares BEFORE the screen (empty squares only, not including screen or beyond)
-                // rays[nearest] = squares BEYOND nearest
-                // Also exclude occupied squares (both own and enemy)
+                // Quiet moves: squares from cannon position up to (but not including) the screen
+                // rays[sq][dir] = all squares in direction from cannon
+                // rays[nearest][dir] = squares beyond the screen
+                // So: rays[sq][dir] & !rays[nearest][dir] = squares between cannon and screen (quiet)
                 let quiet_ray = ray & !(rays[nearest as usize][dir]) & !occ;
                 attacks |= quiet_ray;
 
-                // Capture: squares BEYOND the screen that are occupied by enemy
-                // (blockers in the ray beyond the nearest screen)
-                let second_blockers = ray & occ & rays[nearest as usize][dir];
-                if second_blockers != 0 {
-                    // Second blocker: same direction logic (it's the nearest remaining blocker)
+                // Capture: first piece AFTER the screen (cannon jumps over screen and lands on it)
+                // block once (at screen), continue sliding to find second piece
+                let beyond_screen = ray & rays[nearest as usize][dir] & occ;
+                if beyond_screen != 0 {
                     let second = if dir % 2 == 0 {
-                        Self::lsb_index(second_blockers)
+                        Self::lsb_index(beyond_screen)
                     } else {
-                        Self::msb_index(second_blockers)
+                        Self::msb_index(beyond_screen)
                     };
-                    // Capture only if target is NOT our own piece
+                    // Capture only if target is enemy piece (not our own)
                     if occ_color & (1_u128 << second) == 0 {
                         attacks |= 1_u128 << second;
                     }
