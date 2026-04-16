@@ -450,40 +450,11 @@ pub fn elephant_structure(board: &Board, color: Color, phase: i32) -> i32 {
         1 => 40 * mg_factor + 100 * eg_factor,   // Missing one
         _ => 0,
     };
-    -penalty / TOTAL_PHASE * color.sign()
+    // Correct formula: -(penalty / TOTAL_PHASE) * (-color.sign())
+    // Red (sign=+1): -(penalty/TOTAL_PHASE) * (-1) = -(penalty/TOTAL_PHASE) [subtracts from Red score]
+    // Black (sign=-1): -(penalty/TOTAL_PHASE) * (+1) = +(penalty/TOTAL_PHASE) [adds to Red score]
+    -(penalty / TOTAL_PHASE) * (-color.sign())
 }
-```
-
-**Note**: The sign handling here — the penalty is naturally negative. Then we apply `* color.sign()` so Red gets negative (bad) and Black gets positive (good from Black's perspective). But since the final eval negates for Black's perspective anyway... actually simpler: just return `-(penalty / TOTAL_PHASE) * color.sign()`.
-
-Actually, let me reconsider: the penalty should be subtracted from Red's score. So:
-- If Red has 0 elephants: `score -= penalty` → Red score goes down
-- If Black has 0 elephants: `score += penalty` → Red score goes up (Black is hurt)
-So: `penalty * color.sign()` where penalty is positive = subtract for Red, add for Black.
-
-Wait, let me think again. `score * color.sign()` means Red→positive, Black→negative.
-- Red missing elephants: we want score to decrease → score is already positive, we subtract → `score -= 80 * mg_factor...`
-- Black missing elephants: we want Red's score to increase → from Red's perspective, Black being hurt is good → score should go up → but `score * color.sign()` means Black→negative, so to INCREASE Red's score we need to make it LESS negative
-
-Simpler approach: just return `penalty * color.sign()` directly where penalty is positive for missing elephants:
-```rust
-// Missing = negative for that side. penalty is positive number.
-let penalty_val = match count {
-    0 => 80 * mg_factor + 200 * eg_factor,
-    1 => 40 * mg_factor + 100 * eg_factor,
-    _ => 0,
-};
--penalty_val / TOTAL_PHASE * color.sign()
-```
-
-Actually the cleanest is: return the penalty value with proper sign already applied:
-```rust
--penalty_val / TOTAL_PHASE * color.sign()
-```
-- For Red (sign=+1): `-(penalty) * 1 = -penalty` → Red score decreases (correct)
-- For Black (sign=-1): `-(penalty) * -1 = +penalty` → Red score increases (correct, Black being hurt is good for Red)
-
-OK that's correct.
 
 - [ ] **Step 2: Verify tests still pass**
 
@@ -675,7 +646,6 @@ fn can_attack(board: &Board, from: Coord, to: Coord, pt: PieceType) -> bool {
         PieceType::Horse => dist <= 2,
         PieceType::Pawn => dist == 1,
         PieceType::Advisor | PieceType::Elephant | PieceType::King => dist == 1,
-        PieceType::Pawn => false, // handled above
     }
 }
 
