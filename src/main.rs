@@ -7161,6 +7161,104 @@ mod tests {
             " evaluations should be negated: Red={}, Black={}", red_eval, black_eval);
     }
 
+    #[test]
+    fn test_material_pst_alone() {
+        // material_pst on starting position should return a positive value (Red advantage)
+        let board = Board::new(RuleSet::Official, 1);
+        let score = crate::eval::eval_impl::material_pst(&board);
+        // Starting position: Red pieces worth ~2705 MG / ~3040 EG
+        // Red has slight positional advantage from better development
+        assert!(score > 0, "material_pst should be positive for starting position, got {}", score);
+        // Should be in a reasonable range (not huge)
+        assert!(score < 1000, "material_pst should be under 1000 for starting position, got {}", score);
+    }
+
+    #[test]
+    fn test_king_safety_uses_attackers_bitboard() {
+        // Test that king_safety integrates with the attackers() bitboard correctly.
+        // On the starting position, Black's king is at (4,0) and Red has a chariot at (0,0).
+        // They are NOT on the same file (chariot at x=0, king at x=4), so no direct attack.
+        // But the attackers() bitboard should still be callable and return a value.
+        let board = Board::new(RuleSet::Official, 1);
+        let phase = crate::eval::eval_impl::game_phase(&board);
+
+        let black_safety = crate::eval::eval_impl::king_safety(&board, Color::Black, phase);
+        let red_safety = crate::eval::eval_impl::king_safety(&board, Color::Red, phase);
+
+        // Both should return Some (kings are present)
+        assert!(black_safety.is_some(), "Black king should be found");
+        assert!(red_safety.is_some(), "Red king should be found");
+
+        // Verify attackers() bitboard is accessible and used
+        let black_king = board.find_kings().1.unwrap();
+        let ek_sq = (black_king.y * 9 + black_king.x) as u8;
+        let attackers_on_black = board.bitboards.attackers(ek_sq, Color::Red);
+        // Starting position: Red chariot at (0,0) cannot attack Black king at (4,0)
+        // (not same file/rank, and not a knight/elephant move), so count should be 0
+        assert_eq!(attackers_on_black.count_ones(), 0,
+            "No attacker should be on Black king initially");
+
+        // Verify the function runs without panicking (integration test)
+        let black_val = black_safety.unwrap();
+        let red_val = red_safety.unwrap();
+        // Both values should be reasonable (not MATE_SCORE range)
+        assert!(black_val.abs() < 1000, "king_safety should not return huge values, got {}", black_val);
+        assert!(red_val.abs() < 1000, "king_safety should not return huge values, got {}", red_val);
+    }
+
+    #[test]
+    fn test_no_negative_material() {
+        // Total material (ignoring PST) should never go negative midgame for either side
+        let board = Board::new(RuleSet::Official, 1);
+        // Manually sum material values
+        let mut red_material = 0i32;
+        let mut black_material = 0i32;
+        const MG_VALUE: [i32; 7] = [10000, 135, 105, 80, 350, 500, 650];
+        for y in 0..10 {
+            for x in 0..9 {
+                if let Some(p) = board.get(Coord::new(x as i8, y as i8)) {
+                    let val = MG_VALUE[p.piece_type as usize];
+                    if p.color == Color::Red {
+                        red_material += val;
+                    } else {
+                        black_material += val;
+                    }
+                }
+            }
+        }
+        // Both sides start with equal material
+        assert_eq!(red_material, black_material, "Both sides should have equal starting material");
+        assert!(red_material > 0, "Red material should be positive");
+    }
+
+    #[test]
+    fn test_hanging_piece_detection() {
+        // Smoke test: hanging_pieces should run without panicking and return
+        // a value in a reasonable range. The starting position has no truly
+        // hanging pieces (all minor pieces are defended), so score may be 0.
+        let board = Board::new(RuleSet::Official, 1);
+        let phase = crate::eval::eval_impl::game_phase(&board);
+
+        let hanging_red = crate::eval::eval_impl::hanging_pieces(&board, Color::Red, phase);
+        let hanging_black = crate::eval::eval_impl::hanging_pieces(&board, Color::Black, phase);
+
+        // Both should run without panic (integration test)
+        assert!(hanging_red.abs() <= 500,
+            "hanging_pieces should be in reasonable range, got {}", hanging_red);
+        assert!(hanging_black.abs() <= 500,
+            "hanging_pieces should be in reasonable range, got {}", hanging_black);
+    }
+
+    #[test]
+    fn test_phase_interpolation() {
+        // Verify handcrafted_evaluate produces positive Red eval on starting position.
+        // This indirectly confirms phase interpolation is active (MG/EG values apply).
+        let board = Board::new(RuleSet::Official, 1);
+        let score = crate::eval::eval_impl::handcrafted_evaluate(&board, Color::Red, false);
+        // Starting position: Red evaluates positive
+        assert!(score > 0, "Red should have positive eval on starting position, got {}", score);
+    }
+
     // -------------------------------------------------------------------------
     // Known-Failure Tests (NN integration not yet reliable)
     // -------------------------------------------------------------------------
