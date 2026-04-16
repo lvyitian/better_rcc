@@ -580,34 +580,34 @@ EOF
 Simple geometric checks — no move generation needed:
 
 ```rust
-/// True if attacker at `from` can attack `to` given attacker's piece type.
-/// - Sliding (chariot/cannon): same row or same column, clear path
-/// - Horse: knight distance (dist <= 2 in taxi metric)
-/// - Pawn: adjacent diagonal (dist == 1 in taxi metric)
-/// - Advisor/Elephant/King: adjacent (dist == 1 in taxi metric)
-fn can_attack(board: &Board, from: Coord, to: Coord, pt: PieceType) -> bool {
-    let dist = (from.x - to.x).abs() + (from.y - to.y).abs();
+/// True if attacker at `from` can attack `to` given attacker's piece type and color.
+/// All pieces use Manhattan (taxi) distance: |dx| + |dy|
+/// - Chariot: same row/col, clear path
+/// - Cannon: same row/col, exactly 1 screen
+/// - Horse: L-move, Manhattan = 3
+/// - Pawn: orthogonal forward (both colors), or forward+sideways after crossing river
+/// - Advisor: diagonal ±1, in palace
+/// - Elephant: diagonal ±2, eye empty, doesn't cross river
+/// - King: orthogonal ±1, in palace
+fn can_attack(board: &Board, from: Coord, to: Coord, pt: PieceType, color: Color) -> bool {
+    let dx = (to.x - from.x).abs() as i32;
+    let dy = (to.y - from.y).abs() as i32;
+    let dist = dx + dy;
     match pt {
         PieceType::Chariot => {
             if from.y == to.y {
-                // Same row — check clear path
                 let step = if from.x < to.x { 1 } else { -1 };
                 let mut x = from.x + step;
                 while x != to.x {
-                    if board.get(Coord::new(x, from.y)).is_some() {
-                        return false;
-                    }
+                    if board.get(Coord::new(x, from.y)).is_some() { return false; }
                     x += step;
                 }
                 true
             } else if from.x == to.x {
-                // Same column — check clear path
                 let step = if from.y < to.y { 1 } else { -1 };
                 let mut y = from.y + step;
                 while y != to.y {
-                    if board.get(Coord::new(from.x, y)).is_some() {
-                        return false;
-                    }
+                    if board.get(Coord::new(from.x, y)).is_some() { return false; }
                     y += step;
                 }
                 true
@@ -616,15 +616,12 @@ fn can_attack(board: &Board, from: Coord, to: Coord, pt: PieceType) -> bool {
             }
         }
         PieceType::Cannon => {
-            // Exactly 1 screen between attacker and target
             if from.y == to.y {
                 let step = if from.x < to.x { 1 } else { -1 };
                 let mut screens = 0;
                 let mut x = from.x + step;
                 while x != to.x {
-                    if board.get(Coord::new(x, from.y)).is_some() {
-                        screens += 1;
-                    }
+                    if board.get(Coord::new(x, from.y)).is_some() { screens += 1; }
                     x += step;
                 }
                 screens == 1
@@ -633,9 +630,7 @@ fn can_attack(board: &Board, from: Coord, to: Coord, pt: PieceType) -> bool {
                 let mut screens = 0;
                 let mut y = from.y + step;
                 while y != to.y {
-                    if board.get(Coord::new(from.x, y)).is_some() {
-                        screens += 1;
-                    }
+                    if board.get(Coord::new(from.x, y)).is_some() { screens += 1; }
                     y += step;
                 }
                 screens == 1
@@ -643,21 +638,64 @@ fn can_attack(board: &Board, from: Coord, to: Coord, pt: PieceType) -> bool {
                 false
             }
         }
-        PieceType::Horse => dist <= 2,
-        PieceType::Pawn => dist == 1,
-        PieceType::Advisor | PieceType::Elephant | PieceType::King => dist == 1,
+        PieceType::Horse => dist == 3, // L-move: (2,1) or (1,2) → taxi = 3
+        PieceType::Pawn => {
+            // Pawns in Chinese Chess move/capture ORTHOGONALLY (not diagonally)
+            // Forward: Red=-1 (toward y=0), Black=+1 (toward y=9)
+            // After crossing river: can also move/capture sideways (dx=±1)
+            let forward_dir = if color == Color::Red { -1 } else { 1 };
+            let raw_dx = to.x - from.x;
+            let raw_dy = to.y - from.y;
+            let is_forward = raw_dy == forward_dir;
+            let is_sideways = raw_dx.abs() == 1 && raw_dy == 0;
+            let crossed = from.crosses_river(color);
+            (is_forward || (crossed && is_sideways)) && dist == 1
+        }
+        PieceType::Advisor => {
+            // Advisor: diagonal ±1 step, must be in palace
+            dist == 2 && to.in_palace(color)
+        }
+        PieceType::Elephant => {
+            // Elephant: diagonal ±2 steps, eye empty, doesn't cross river
+            if dist != 4 || to.crosses_river(color) { return false; }
+            let eye_x = from.x + (to.x - from.x) / 2;
+            let eye_y = from.y + (to.y - from.y) / 2;
+            board.get(Coord::new(eye_x, eye_y)).is_none()
+        }
+        PieceType::King => {
+            // King: orthogonal ±1, must be in palace
+            dist == 1 && to.in_palace(color)
+        }
     }
 }
 
-/// True if defender at `from` can defend `to` (same as can_attack but no capture check)
-/// For sliding pieces: same line (not requiring clear path — a piece can "see" its defender)
-fn can_defend(board: &Board, from: Coord, to: Coord, pt: PieceType) -> bool {
-    let dist = (from.x - to.x).abs() + (from.y - to.y).abs();
+/// True if defender at `from` can defend `to` (same geometric rules as can_attack, no capture check)
+/// A piece can defend any square it could move to (ignoring whether the target square is occupied)
+fn can_defend(board: &Board, from: Coord, to: Coord, pt: PieceType, color: Color) -> bool {
+    let dx = (to.x - from.x).abs() as i32;
+    let dy = (to.y - from.y).abs() as i32;
+    let dist = dx + dy;
     match pt {
         PieceType::Chariot | PieceType::Cannon => from.y == to.y || from.x == to.x,
-        PieceType::Horse => dist <= 2,
-        PieceType::Pawn => dist == 1,
-        PieceType::Advisor | PieceType::Elephant | PieceType::King => dist == 1,
+        PieceType::Horse => dist == 3, // L-move
+        PieceType::Pawn => {
+            // Same orthogonal rules as can_attack (defending doesn't check if target is enemy)
+            let forward_dir = if color == Color::Red { -1 } else { 1 };
+            let raw_dx = to.x - from.x;
+            let raw_dy = to.y - from.y;
+            let is_forward = raw_dy == forward_dir;
+            let is_sideways = raw_dx.abs() == 1 && raw_dy == 0;
+            let crossed = from.crosses_river(color);
+            (is_forward || (crossed && is_sideways)) && dist == 1
+        }
+        PieceType::Advisor => dist == 2 && to.in_palace(color),
+        PieceType::Elephant => {
+            if dist != 4 || to.crosses_river(color) { return false; }
+            let eye_x = from.x + (to.x - from.x) / 2;
+            let eye_y = from.y + (to.y - from.y) / 2;
+            board.get(Coord::new(eye_x, eye_y)).is_none()
+        }
+        PieceType::King => dist == 1 && to.in_palace(color),
     }
 }
 ```
@@ -681,13 +719,13 @@ pub fn hanging_pieces(board: &Board, color: Color, phase: i32) -> i32 {
         let mut defenders = 0;
 
         for our_piece in &our {
-            if can_attack(board, our_piece.pos, enemy_piece.pos, our_piece.pt) {
+            if can_attack(board, our_piece.pos, enemy_piece.pos, our_piece.pt, color) {
                 attackers += 1;
             }
         }
         for (idx, def_piece) in enemy.iter().enumerate() {
             if def_piece.pos == enemy_piece.pos { continue; } // no self-defense
-            if can_defend(board, def_piece.pos, enemy_piece.pos, def_piece.pt) {
+            if can_defend(board, def_piece.pos, enemy_piece.pos, def_piece.pt, color.opponent()) {
                 defenders += 1;
             }
         }
